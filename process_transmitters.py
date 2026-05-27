@@ -37,6 +37,9 @@ df_antenna['Longitude'] = pd.to_numeric(df_antenna['Longitude'])
 df_antenna['height'] = df_antenna['height'].str.replace(',', '.', regex=False)
 df_antenna['height'] = pd.to_numeric(df_antenna['height'])
 
+# fill NaN `height` field using the corresponding 'Hauteur en m' field
+df_antenna['height'] = df_antenna['height'].fillna(df_antenna['Hauteur en m'])
+
 # unify Unité to lowercase
 df_bands['Unité'] = df_bands['Unité'].str.lower()
 
