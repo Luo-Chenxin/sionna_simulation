@@ -1,5 +1,6 @@
 from sionna.rt import RadioMaterial
 from utils.material_properties import calculate_freshwater_permittivity, calculate_material_properties
+from sionna.rt.radio_materials.radio_material import DEFAULT_THICKNESS
 
 # Material Database (Template)
 # You can add your own materials here
@@ -53,7 +54,7 @@ def _format_frequency(freq_hz):
         
     return f"{str_val}_{unit}"
 
-def create_sionna_material(material_name, frequency_hz):
+def create_sionna_material(material_name, frequency_hz, thickness=DEFAULT_THICKNESS):
     """
     Get material parameters, check frequency limits, 
     and return a Sionna RadioMaterial instance.
@@ -61,7 +62,7 @@ def create_sionna_material(material_name, frequency_hz):
     Parameters:
     - material_name (str): Key from MATERIAL_DATABASE.
     - frequency_hz (float): Frequency in Hz (Sionna default).
-    - custom_f_range (tuple, optional): (f_min, f_max) in GHz to override limits.
+    - thickness: material thickness in meter
     """
     # Check if the material exists
     if material_name not in MATERIAL_DATABASE:
@@ -96,9 +97,11 @@ def create_sionna_material(material_name, frequency_hz):
     # Create Sionna RadioMaterial object
     # Append frequency to the name for clear tracking inside Sionna
     sionna_name = f"{material_name}_{_format_frequency(frequency_hz)}"
+    
     return RadioMaterial(
         name=sionna_name, 
         relative_permittivity=eps_real, 
         conductivity=sigma,
+        thickness= thickness,
         color=mat_color,
     )
