@@ -72,6 +72,9 @@ def latlonh_to_xyz_batch(
     """
     Batch convert geographic coordinates (Latitude, Longitude, height) to
     the local Cartesian coordinates (x, y, z) of the scene.
+    The positive x-axis direction represents the direction of increasing longitude, 
+    the positive y-axis direction represents the direction of increasing latitude, 
+    and the positive z-axis direction represents the direction of increasing altitude.
 
     Returns np.ndarray if inputs are Pandas Series, otherwise returns float.
     """
