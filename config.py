@@ -1,4 +1,4 @@
-from pathlib import Path 
+from pathlib import Path
 
 SCENE_FILENAME = Path('data/blender/massy.xml')
 TERRAIN_FILENAME = Path('data/blender/terrain.xml')  # Optional: if it is None, we use ALT_ORIGIN to get terrain height
@@ -9,6 +9,11 @@ RECEIVER_FILENAME = Path('data/sensor_location.csv')
 PRE_TRANSMITTER_FILENAME = Path('data/bs_antenna_verify - Copy.csv')
 PRE_TRANSMITTER_FILE_ENCODE = 'cp1252'
 FILE_ENCODE = 'utf-8-sig'
+
+ANTENNES_INFO_FILENAME = Path('data/paris_whole/Antennes_Emetteurs_Bandes_Cartoradio.csv')
+ANTENNES_LOC_FILENAME = Path('data/paris_whole/Sites_Cartoradio.csv')
+FILTER_FREQUENCE = 2600
+FILTER_POSTAL_CODE = r'^75\d{3}$'
 
 # Define the geographical boundary of the target region
 LAT_MAX, LAT_MIN = 48.7409, 48.7171

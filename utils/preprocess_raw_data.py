@@ -1,12 +1,20 @@
 from pathlib import Path
 import pandas as pd
-from config import PRE_TRANSMITTER_FILENAME, TRANSMITTER_DIRECTORY, PRE_TRANSMITTER_FILE_ENCODE, FILE_ENCODE
+from config import PRE_TRANSMITTER_FILENAME, TRANSMITTER_DIRECTORY, \
+    PRE_TRANSMITTER_FILE_ENCODE, FILE_ENCODE, \
+    ANTENNES_INFO_FILENAME, ANTENNES_LOC_FILENAME, \
+    FILTER_FREQUENCE, FILTER_POSTAL_CODE
 
 def preprocess_massy_antenna_data(
     input_file: Path = PRE_TRANSMITTER_FILENAME,
     output_dir: Path = TRANSMITTER_DIRECTORY,
 ) -> None:
-    """Clean antenna data and split it into files by frequency."""
+    """
+    Clean antenna data and split it into files by frequency
+    
+    The returned table preserves all main rows and includes columns:
+    [ID, Numéro de Station, Numéro d'antenne, Latitude, Longitude, height, Azimut, frequency]
+    """
 
     # Columns to change to numbers
     num_cols = ["Latitude", "Longitude", "height", "Hauteur en m"]
@@ -94,3 +102,82 @@ def preprocess_massy_antenna_data(
         print(f"Saved: {path_out} ({len(result_df)} rows)")
 
     print("\nAll done!")
+
+
+def preprocess_antenna_data_by_frequency_and_postal(
+    main_input_file: Path = ANTENNES_INFO_FILENAME,
+    secondary_input_file: Path = ANTENNES_LOC_FILENAME,
+    frequency: int = FILTER_FREQUENCE,
+    postal_code: str = FILTER_POSTAL_CODE,
+    output_dir: Path = TRANSMITTER_DIRECTORY,
+) -> None:
+    """
+    Filter antenna records by Système frequency and postal code, then join coordinates.
+
+    Main table is deduplicated on `Numéro de support`.
+    Secondary table renames `Numéro du support` to `Numéro de support` and left-joins on that key.
+    The returned table preserves all main rows and includes columns:
+    [ID, Numéro de support, Latitude, Longitude, height, Azimut, frequency, Code postal]
+    """
+
+    # Load main antenna table
+    main_df = pd.read_csv(
+        main_input_file,
+        encoding=PRE_TRANSMITTER_FILE_ENCODE,
+        sep=';',
+        usecols=lambda x: 'Unnamed' not in str(x),
+    )
+    main_df.columns = main_df.columns.str.strip()
+
+    # Load secondary site table
+    secondary_df = pd.read_csv(
+        secondary_input_file,
+        encoding=PRE_TRANSMITTER_FILE_ENCODE,
+        sep=';',
+        usecols=lambda x: 'Unnamed' not in str(x),
+    )
+    secondary_df.columns = secondary_df.columns.str.strip()
+
+    # Deduplicate main table on Numéro de support
+    main_df = main_df.drop_duplicates(subset=['Numéro de support']).copy()
+
+    # Rename main table fields
+    main_df = main_df.rename(columns={'Hauteur / sol': 'height', 'Système': 'frequency'})
+
+    # Rename secondary key and deduplicate coordinates in secondary table
+    secondary_df = secondary_df.rename(columns={'Numéro du support': 'Numéro de support'})
+    secondary_df = secondary_df.drop_duplicates(subset=['Numéro de support']).copy()
+
+    # Left join secondary coordinates and postal code onto main table
+    merged_df = pd.merge(
+        main_df,
+        secondary_df[['Numéro de support', 'Longitude', 'Latitude', 'Code postal']],
+        on='Numéro de support',
+        how='left',
+    )
+
+    # Filter final result by frequency and postal code
+    freq_clean = merged_df['frequency'].astype(str).str.strip().str.lower()
+    freq_extracted = freq_clean.str.extract(r"(\d+)\s*$", expand=False).fillna("unknown")
+    merged_df = merged_df[freq_extracted == str(frequency)].copy()
+    merged_df = merged_df[merged_df['Code postal'].astype(str).str.match(postal_code)].copy()
+
+    # Keep only the requested output columns and preserve order
+    output_cols = [
+        'Numéro de support', 
+        'Latitude', 
+        'Longitude', 
+        'height', 
+        'Azimut', 
+        'frequency',
+        'Code postal',
+    ]
+    result_df = merged_df[[col for col in output_cols if col in merged_df.columns]].copy()
+    result_df.insert(0, 'ID', range(1, len(result_df) + 1))
+
+    # Save to a new CSV file
+    file_name = f"{frequency}_mhz.csv"
+    path_out = output_dir / file_name
+
+    result_df.to_csv(path_out, index=False, encoding=FILE_ENCODE)
+    print(f"Saved: {path_out} ({len(result_df)} rows)")
