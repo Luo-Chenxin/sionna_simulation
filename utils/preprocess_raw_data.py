@@ -114,6 +114,8 @@ def preprocess_antenna_data_by_frequency_and_postal(
     """
     Filter antenna records by Système frequency and postal code, then join coordinates.
 
+    Notice: frequency unit is `mhz` both in the parameter and input files
+
     Main table is deduplicated on `Numéro de support`.
     Secondary table renames `Numéro du support` to `Numéro de support` and left-joins on that key.
     The returned table preserves all main rows and includes columns:
