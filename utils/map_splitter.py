@@ -1,6 +1,23 @@
 import numpy as np
 from pyproj import Transformer
 from config import LocalCRS
+from dataclasses import dataclass
+
+@dataclass
+class BlockMeta:
+    row: int
+    col: int
+    name: str
+    block_size_m: int
+    x_start: int
+    x_end: int
+    y_start: int
+    y_end: int
+    lat_min: float
+    lat_max: float
+    lon_min: float
+    lon_max: float
+    over_lap_m: int
 
 class TileSplitter:
     def __init__(
@@ -12,7 +29,7 @@ class TileSplitter:
             block_size_m: int, 
             overlap_m: int):
         """
-        Initialize the splitter.
+        Initialize the splitter with pure meter-level grid alignment.
         """
         self.block_size_m = block_size_m
         self.overlap_m = overlap_m
@@ -24,11 +41,12 @@ class TileSplitter:
         x_left_bottom, y_left_bottom = self.to_utm.transform(lon_min, lat_min)
         x_right_top, y_right_top = self.to_utm.transform(lon_max, lat_max)
         
-        # Get min and max values for X and Y.
-        self.x_min = min(x_left_bottom, x_right_top)
-        self.x_max = max(x_left_bottom, x_right_top)
-        self.y_min = min(y_left_bottom, y_right_top)
-        self.y_max = max(y_left_bottom, y_right_top)
+        # Get min and max values for X and Y
+        # Force boundaries to be absolute integers to avoid float bugs
+        self.x_min = int(np.floor(min(x_left_bottom, x_right_top)))
+        self.x_max = int(np.ceil(max(x_left_bottom, x_right_top)))
+        self.y_min = int(np.floor(min(y_left_bottom, y_right_top)))
+        self.y_max = int(np.ceil(max(y_left_bottom, y_right_top)))
         
         # Calculate total width and height in meters.
         total_width_m = self.x_max - self.x_min
@@ -43,7 +61,7 @@ class TileSplitter:
         print(f"Total Width: {total_width_m:.2f}m, Total Height: {total_height_m:.2f}m")
         print(f"Grid Size: {self.rows} rows x {self.cols} cols. Total blocks: {self.rows * self.cols}")
 
-    def get_block_latlon_bounds(self, row, col, with_overlap=True):
+    def get_block_latlon_bounds(self, row, col) -> BlockMeta:
         """
         Get Lat/Lon bounds for one block.
         row: index from 0 to rows-1
@@ -59,23 +77,29 @@ class TileSplitter:
         y_start = self.y_min + row * self.block_size_m
         y_end = y_start + self.block_size_m
         
-        # Add overlap buffer if needed.
-        if with_overlap:
-            x_start -= self.overlap_m
-            x_end += self.overlap_m
-            y_start -= self.overlap_m
-            y_end += self.overlap_m
+        # Add overlap buffer
+        x_start -= self.overlap_m
+        x_end += self.overlap_m
+        y_start -= self.overlap_m
+        y_end += self.overlap_m
             
         # Change meters back to Lat/Lon.
-        lon_min_block, lat_min_block = self.to_latlon.transform(x_start, y_start)
-        lon_max_block, lat_max_block = self.to_latlon.transform(x_end, y_end)
+        lon_1_block, lat_1_block = self.to_latlon.transform(x_start, y_start)
+        lon_2_block, lat_2_block = self.to_latlon.transform(x_end, y_end)
         
-        return {
-            "lat_min": min(lat_min_block, lat_max_block),
-            "lat_max": max(lat_min_block, lat_max_block),
-            "lon_min": min(lon_min_block, lon_max_block),
-            "lon_max": max(lon_min_block, lon_max_block)
-        }
+        return BlockMeta(
+            row=row,
+            col=col,
+            name=f"block_{row}_{col}",
+            block_size_m = self.block_size_m,
+            x_start=x_start, x_end=x_end,
+            y_start=y_start, y_end=y_end,
+            lat_min=min(lat_1_block, lat_2_block),
+            lat_max=max(lat_1_block, lat_2_block),
+            lon_min=min(lon_1_block, lon_2_block),
+            lon_max=max(lon_1_block, lon_2_block),
+            over_lap_m= self.overlap_m
+        )
 
     def get_all_blocks(self):
         """
@@ -90,20 +114,3 @@ class TileSplitter:
                     "name": f"block_{r}_{c}"
                 })
         return blocks_list
-
-# --- Example Usage ---
-if __name__ == "__main__":
-    # Test values for Paris
-    LAT_MAX, LAT_MIN = 48.9059, 48.8138
-    LON_MIN, LON_MAX = 2.2429, 2.4574
-
-    splitter = TileSplitter(
-        lat_min=LAT_MIN, lat_max=LAT_MAX, 
-        lon_min=LON_MIN, lon_max=LON_MAX, 
-        block_size_m=2000, overlap_m=150
-    )
-
-    # Get bounds for block (0,0) with overlap
-    osm_bounds = splitter.get_block_latlon_bounds(row=0, col=0, with_overlap=True)
-    print("\nBounds with overlap for OSM download:")
-    print(osm_bounds)

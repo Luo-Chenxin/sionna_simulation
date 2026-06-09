@@ -4,3 +4,4 @@ data
 outputs
 __pycache__
 temp*
+cache*
