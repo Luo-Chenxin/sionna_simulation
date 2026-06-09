@@ -1,10 +1,10 @@
-from pyproj import Transformer
+from pyproj import Transformer, CRS
 import mitsuba as mi
 import drjit as dr
 import numpy as np
 import pandas as pd
 import sionna.rt as rt
-from config import DEFAULT_AZIMUTH_MUTIPLITER, DEFAULT_OFF_SET, LocalCRS
+from config import DEFAULT_AZIMUTH_MUTIPLITER, DEFAULT_OFF_SET
 
 def _get_terrain_z_batch(
         xs: np.ndarray,
@@ -46,17 +46,19 @@ class SceneCoordinateConverter:
     """
     Convert Paris latitude, longitude and height to local XYZ.
     """
-    def __init__(self, lat_origin: float, lon_origin: float, alt_origin: float = 0.0):
+    def __init__(
+            self, 
+            lat_origin: float, 
+            lon_origin: float, 
+            alt_origin: float,
+            original_crs: CRS,
+            target_crs: CRS):
         self.lat_origin = lat_origin
         self.lon_origin = lon_origin
         self.alt_origin = alt_origin
         
         # Create transformer once for speed.
-        self._transformer = Transformer.from_crs(
-            LocalCRS.OSM_STORAGE.crs,
-            LocalCRS.FRANCE_LAMBERT93.crs,
-            always_xy=True,
-        )
+        self._transformer = Transformer.from_crs(original_crs, target_crs, always_xy=True)
         
         # Save the scene origin in projected (Lambert-93 coordinates) meters
         self._x_origin, self._y_origin = self._transformer.transform(

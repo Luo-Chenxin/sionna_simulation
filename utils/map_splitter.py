@@ -1,18 +1,24 @@
 import numpy as np
 from pyproj import Transformer
+from config import LocalCRS
 
 class TileSplitter:
-    def __init__(self, lat_min, lat_max, lon_min, lon_max, block_size_m=2000, overlap_m=150):
+    def __init__(
+            self, 
+            lat_min: float, 
+            lat_max: float, 
+            lon_min: float, 
+            lon_max: float, 
+            block_size_m: int, 
+            overlap_m: int):
         """
         Initialize the splitter.
         """
         self.block_size_m = block_size_m
         self.overlap_m = overlap_m
         
-        # Use UTM Zone 31N (EPSG:32631) for Paris area.
-        # EPSG:4326 is Lat/Lon. EPSG:32631 is UTM meter.
-        self.to_utm = Transformer.from_crs("epsg:4326", "epsg:32631", always_xy=True)
-        self.to_latlon = Transformer.from_crs("epsg:32631", "epsg:4326", always_xy=True)
+        self.to_utm = Transformer.from_crs(LocalCRS.OSM_STORAGE.crs, LocalCRS.FRANCE_LAMBERT93.crs, always_xy=True)
+        self.to_latlon = Transformer.from_crs(LocalCRS.FRANCE_LAMBERT93.crs, LocalCRS.OSM_STORAGE.crs, always_xy=True)
         
         # Change map corners from Lat/Lon to UTM meters.
         x_left_bottom, y_left_bottom = self.to_utm.transform(lon_min, lat_min)

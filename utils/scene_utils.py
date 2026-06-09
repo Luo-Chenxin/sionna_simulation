@@ -1,8 +1,7 @@
 import sionna.rt as rt
 import pandas as pd
 from utils.geo_coords import SceneCoordinateConverter, deflected_azimuth
-from config import DISPLAY_RADIUS, RECEIVER_GROUND_HEIGHT, \
-DEFAULT_TRANSIMITTER_DBM, DEFAULT_PITCH, DEFAULT_ROLL
+from config import DISPLAY_RADIUS, DEFAULT_TRANSIMITTER_DBM, DEFAULT_PITCH, DEFAULT_ROLL
 
 def get_tx_name(id):
     return f'tx_{id}'
@@ -63,8 +62,6 @@ def add_rxs(
     Batch map geographic Rx coordinates into the 3D scene and instantiate
     Receiver objects.
     """
-    df_rx['height'] = RECEIVER_GROUND_HEIGHT
-
     xs, ys, zs = converter.latlonh_to_xyz_batch(
         df_rx["Latitude"], df_rx["Longitude"], df_rx["height"], terrain_scene
     )  # All receivers are at the same height.

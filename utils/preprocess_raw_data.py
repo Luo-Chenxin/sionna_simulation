@@ -1,13 +1,10 @@
 from pathlib import Path
 import pandas as pd
-from config import PRE_TRANSMITTER_FILENAME, TRANSMITTER_DIRECTORY, \
-    PRE_TRANSMITTER_FILE_ENCODE, FILE_ENCODE, \
-    ANTENNES_INFO_FILENAME, ANTENNES_LOC_FILENAME, \
-    FILTER_FREQUENCE, FILTER_POSTAL_CODE
+from config import PRE_TRANSMITTER_FILE_ENCODE, FILE_ENCODE
 
 def preprocess_massy_antenna_data(
-    input_file: Path = PRE_TRANSMITTER_FILENAME,
-    output_dir: Path = TRANSMITTER_DIRECTORY,
+    input_file: Path,
+    output_dir: Path,
 ) -> None:
     """
     Clean antenna data and split it into files by frequency
@@ -96,7 +93,7 @@ def preprocess_massy_antenna_data(
 
         # Save to a new CSV file
         file_name = f"{freq_num}_mhz.csv"
-        path_out = TRANSMITTER_DIRECTORY / file_name
+        path_out = output_dir / file_name
 
         result_df.to_csv(path_out, index=False, encoding=FILE_ENCODE)
         print(f"Saved: {path_out} ({len(result_df)} rows)")
@@ -105,11 +102,11 @@ def preprocess_massy_antenna_data(
 
 
 def preprocess_antenna_data_by_frequency_and_postal(
-    main_input_file: Path = ANTENNES_INFO_FILENAME,
-    secondary_input_file: Path = ANTENNES_LOC_FILENAME,
-    frequency: int = FILTER_FREQUENCE,
-    postal_code: str = FILTER_POSTAL_CODE,
-    output_dir: Path = TRANSMITTER_DIRECTORY,
+    main_input_file: Path,
+    secondary_input_file: Path,
+    frequency: int,
+    postal_code: str,
+    output_dir: Path,
 ) -> None:
     """
     Filter antenna records by Système frequency and postal code, then join coordinates.
