@@ -17,7 +17,7 @@ class BlockMeta:
     lat_max: float
     lon_min: float
     lon_max: float
-    over_lap_m: int
+    overlap_m: int
 
 class TileSplitter:
     def __init__(
@@ -98,7 +98,7 @@ class TileSplitter:
             lat_max=max(lat_1_block, lat_2_block),
             lon_min=min(lon_1_block, lon_2_block),
             lon_max=max(lon_1_block, lon_2_block),
-            over_lap_m= self.overlap_m
+            overlap_m= self.overlap_m
         )
 
     def get_all_blocks(self):
