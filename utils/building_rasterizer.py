@@ -11,7 +11,7 @@ class BuildingRasterizer:
     Each cell represents [resolution_m]m x [resolution_m]m on the ground.
     """
     
-    def __init__(self, gdf: gpd.GeoDataFrame, resolution_m):
+    def __init__(self, gdf: gpd.GeoDataFrame, resolution_m: float) -> None:
         """
         Initialize the rasterizer.
         
@@ -19,7 +19,7 @@ class BuildingRasterizer:
         ----------
         gdf : GeoDataFrame
             GeoDataFrame containing OSM building polygons (already filtered)
-        resolution : float
+        resolution_m : float
             Cell size in meters
         """
         self.gdf = gdf.copy()
@@ -27,68 +27,34 @@ class BuildingRasterizer:
         self.matrix = None
         
         # Check if CRS is geographic (uses degrees as units)
-        # If so, we MUST reproject to a projected CRS that uses meters
-        # Otherwise 1 cell = 1 degree, which makes no physical sense
         if self.gdf.crs is None:
             raise ValueError("GeoDataFrame has no CRS defined. Please set a CRS.")
         
         if self.gdf.crs.is_geographic:
-            print(f"Detected geographic CRS ({self.gdf.crs.name}). Reprojecting to {LocalCRS.FRANCE_LAMBERT93.crs.name}...")
             self.gdf = self.gdf.to_crs(LocalCRS.FRANCE_LAMBERT93.crs)
-        else:
-            print(f"Using existing projected CRS: {self.gdf.crs.name}")
     
-    def _prepare_raster_params(self):
-        """
-        Calculate all parameters needed for rasterization.
-        
-        Returns
-        -------
-        tuple
-            (out_shape, transform) for rasterio.rasterize()
-        """
-        # Get the total bounding box of all buildings
-        bounds = self.gdf.total_bounds  # (minx, miny, maxx, maxy)
-        
-        # Calculate grid dimensions in pixels
-        width = int(np.ceil((bounds[2] - bounds[0]) / self.resolution_m))
-        height = int(np.ceil((bounds[3] - bounds[1]) / self.resolution_m))
-        
-        # Create affine transform: maps pixel coordinates to real-world coordinates
-        # from_origin(west, north, pixel_width, pixel_height)
-        # origin is at top-left corner of the grid
-        transform = from_origin(
-            bounds[0],       # west edge (minimum x)
-            bounds[3],       # north edge (maximum y)
-            self.resolution_m, # cell width in meters
-            self.resolution_m  # cell height in meters
-        )
-        
-        out_shape = (height, width)
-        return out_shape, transform, bounds
-    
-    def rasterize(self):
+    def rasterize(self, bounds: tuple[int, int, int, int]):
         """
         Create a binary 2D matrix: 1 for building, 0 for empty.
+        
+        Parameters
+        ----------
+        bounds : tuple or None
+            (x_min, y_min, x_max, y_max) in the projected CRS (meters).
+            If None, use the bounding box of all buildings.
         
         Returns
         -------
         numpy.ndarray
             2D matrix of shape (height, width) with binary values (0 or 1)
         """
-        # Prepare rasterization parameters
-        out_shape, transform, _ = self._prepare_raster_params()
+        out_shape, transform, used_bounds = self._prepare_raster_params(bounds=bounds)
         
         # Create (geometry, value) pairs: each building footprint gets value 1
         shapes = [(geom, 1) for geom in self.gdf.geometry]
         
         # Burn vector shapes into the raster grid
-        # - shapes: list of (geometry, burn_value) tuples
-        # - out_shape: (height, width) of the output array
-        # - transform: affine mapping from pixel coords to world coords
-        # - fill: background value (0 = no building)
-        # - all_touched: if False, only pixels whose CENTER is inside the polygon are filled
-        self.matrix:np.ndarray = rasterize(
+        self.matrix = rasterize(
             shapes=shapes,
             out_shape=out_shape,
             transform=transform,
@@ -97,8 +63,85 @@ class BuildingRasterizer:
             all_touched=False
         )
         
-        print(f"Rasterization complete. Matrix shape: {self.matrix.shape}")
-        print(f"Coverage: {np.sum(self.matrix > 0)} cells with buildings "
-              f"({np.sum(self.matrix > 0) / self.matrix.size * 100:.2f}%)")
+        # Store bounds for later overlap removal
+        self.raster_bounds = used_bounds
         
         return self.matrix
+    
+    def remove_overlap(self, overlap_m: int):
+        """
+        Remove overlap from the rasterized matrix.
+        Crops the matrix from (block_size + 2*overlap) to block_size.
+        
+        Parameters
+        ----------
+        overlap_m : int
+            Overlap in meters that was added to each side.
+            Matrix will be cropped by overlap_m/resolution_m pixels on each side.
+        
+        Returns
+        -------
+        numpy.ndarray
+            Cropped matrix without overlap area
+        """
+        if self.matrix is None:
+            raise ValueError("No matrix to crop. Call rasterize() first.")
+        
+        # Calculate how many pixels to remove from each side
+        pixels_to_crop = int(overlap_m / self.resolution_m)
+        
+        # Validate that we have enough pixels to crop
+        if pixels_to_crop * 2 >= self.matrix.shape[0]:
+            raise ValueError(
+                f"Overlap too large for matrix height. "
+                f"Matrix height: {self.matrix.shape[0]}, "
+                f"pixels to crop (each side): {pixels_to_crop}"
+            )
+        if pixels_to_crop * 2 >= self.matrix.shape[1]:
+            raise ValueError(
+                f"Overlap too large for matrix width. "
+                f"Matrix width: {self.matrix.shape[1]}, "
+                f"pixels to crop (each side): {pixels_to_crop}"
+            )
+        
+        # Crop matrix: remove overlap pixels from all four sides
+        # Note: y-axis is inverted in raster coordinates
+        # top-left is (0,0), so we crop from top, bottom, left, right
+        self.matrix = self.matrix[
+            pixels_to_crop:-pixels_to_crop,    # rows: top and bottom
+            pixels_to_crop:-pixels_to_crop     # cols: left and right
+        ]
+        
+        return self.matrix
+    
+    def _prepare_raster_params(self, bounds: tuple[int, int, int, int]):
+        """
+        Calculate all parameters needed for rasterization.
+        
+        Parameters
+        ----------
+        bounds : tuple or None
+            (x_min, y_min, x_max, y_max) in the projected CRS (meters).
+            If None, use the bounding box of all buildings.
+        
+        Returns
+        -------
+        tuple
+            (out_shape, transform, bounds)
+        """
+        x_min, y_min, x_max, y_max = bounds
+        
+        # Calculate grid dimensions in pixels
+        width = int(np.ceil((x_max - x_min) / self.resolution_m))
+        height = int(np.ceil((y_max - y_min) / self.resolution_m))
+        
+        # Create affine transform: origin at top-left corner
+        transform = from_origin(
+            x_min,              # west edge
+            y_max,              # north edge (note: y_max, not y_min)
+            self.resolution_m,  # cell width in meters
+            self.resolution_m   # cell height in meters
+        )
+        
+        out_shape = (height, width)
+        return out_shape, transform, (x_min, y_min, x_max, y_max)
