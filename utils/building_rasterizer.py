@@ -2,8 +2,9 @@ import geopandas as gpd
 import numpy as np
 from rasterio.features import rasterize
 from rasterio.transform import from_origin
+from typing import Dict
 from config import LocalCRS
-
+from utils.map_splitter import BlockMeta
 
 class BuildingRasterizer:
     """
@@ -11,7 +12,11 @@ class BuildingRasterizer:
     Each cell represents [resolution_m]m x [resolution_m]m on the ground.
     """
     
-    def __init__(self, gdf: gpd.GeoDataFrame, resolution_m: float) -> None:
+    def __init__(
+            self, 
+            gdf: gpd.GeoDataFrame, 
+            block_meta:BlockMeta, 
+            resolution_m: float) -> None:
         """
         Initialize the rasterizer.
         
@@ -19,12 +24,19 @@ class BuildingRasterizer:
         ----------
         gdf : GeoDataFrame
             GeoDataFrame containing OSM building polygons (already filtered)
+        block_meta : BlockMeta
         resolution_m : float
             Cell size in meters
         """
         self.gdf = gdf.copy()
         self.resolution_m = resolution_m
-        self.matrix = None
+        self.block_meta = block_meta
+        self._setup_matrix_bounds()
+
+        # Matrix storage - using dict for future extension
+        # Key: property name (e.g., 'presence', 'height')
+        # Value: 2D numpy array
+        self.matrixs: Dict[str, np.ndarray] = {}
         
         # Check if CRS is geographic (uses degrees as units)
         if self.gdf.crs is None:
@@ -33,115 +45,92 @@ class BuildingRasterizer:
         if self.gdf.crs.is_geographic:
             self.gdf = self.gdf.to_crs(LocalCRS.FRANCE_LAMBERT93.crs)
     
-    def rasterize(self, bounds: tuple[int, int, int, int]):
+    def rasterize_with_presence(self)->np.ndarray:
         """
         Create a binary 2D matrix: 1 for building, 0 for empty.
-        
-        Parameters
-        ----------
-        bounds : tuple or None
-            (x_min, y_min, x_max, y_max) in the projected CRS (meters).
-            If None, use the bounding box of all buildings.
         
         Returns
         -------
         numpy.ndarray
             2D matrix of shape (height, width) with binary values (0 or 1)
         """
-        out_shape, transform, used_bounds = self._prepare_raster_params(bounds=bounds)
-        
+
         # Create (geometry, value) pairs: each building footprint gets value 1
         shapes = [(geom, 1) for geom in self.gdf.geometry]
+
+        transform = from_origin(
+            self.x_min,              # west edge
+            self.y_max,              # north edge (note: y_max, not y_min)
+            self.resolution_m,  # cell width in meters
+            self.resolution_m   # cell height in meters
+        )
         
         # Burn vector shapes into the raster grid
-        self.matrix = rasterize(
+        matrix: np.ndarray = rasterize(
             shapes=shapes,
-            out_shape=out_shape,
+            out_shape=(self.n_rows, self.n_cols),
             transform=transform,
             fill=0,
             dtype=np.uint8,
             all_touched=False
         )
-        
-        # Store bounds for later overlap removal
-        self.raster_bounds = used_bounds
-        
-        return self.matrix
+
+        # Remove overlop
+        matrix = matrix[self.crop_slice]
+
+        self.matrixs['presence'] = matrix
+
+        return matrix
     
-    def remove_overlap(self, overlap_m: int):
+    def _setup_matrix_bounds(self):
         """
-        Remove overlap from the rasterized matrix.
-        Crops the matrix from (block_size + 2*overlap) to block_size.
-        
-        Parameters
-        ----------
-        overlap_m : int
-            Overlap in meters that was added to each side.
-            Matrix will be cropped by overlap_m/resolution_m pixels on each side.
-        
-        Returns
-        -------
-        numpy.ndarray
-            Cropped matrix without overlap area
+        Calculate matrix boundaries from BlockMeta in projected coordinates.
+        BlockMeta already has x_start, x_end, y_start, y_end in meters.
         """
-        if self.matrix is None:
-            raise ValueError("No matrix to crop. Call rasterize() first.")
+        # Use BlockMeta's meter coordinates directly
+        self.x_min = self.block_meta.x_start
+        self.x_max = self.block_meta.x_end
+        self.y_min = self.block_meta.y_start
+        self.y_max = self.block_meta.y_end
+
+        self.overlap_m =self.block_meta.overlap_m
         
-        # Calculate how many pixels to remove from each side
-        pixels_to_crop = int(overlap_m / self.resolution_m)
+        # Calculate matrix dimensions
+        total_width = self.x_max - self.x_min
+        total_height = self.y_max - self.y_min
         
-        # Validate that we have enough pixels to crop
-        if pixels_to_crop * 2 >= self.matrix.shape[0]:
-            raise ValueError(
-                f"Overlap too large for matrix height. "
-                f"Matrix height: {self.matrix.shape[0]}, "
-                f"pixels to crop (each side): {pixels_to_crop}"
-            )
-        if pixels_to_crop * 2 >= self.matrix.shape[1]:
-            raise ValueError(
-                f"Overlap too large for matrix width. "
-                f"Matrix width: {self.matrix.shape[1]}, "
-                f"pixels to crop (each side): {pixels_to_crop}"
-            )
+        self.n_cols = int(np.ceil(total_width / self.resolution_m))
+        self.n_rows = int(np.ceil(total_height / self.resolution_m))
         
-        # Crop matrix: remove overlap pixels from all four sides
-        # Note: y-axis is inverted in raster coordinates
-        # top-left is (0,0), so we crop from top, bottom, left, right
-        self.matrix = self.matrix[
-            pixels_to_crop:-pixels_to_crop,    # rows: top and bottom
-            pixels_to_crop:-pixels_to_crop     # cols: left and right
-        ]
-        
-        return self.matrix
-    
-    def _prepare_raster_params(self, bounds: tuple[int, int, int, int]):
+        # Pre-calculate crop indices for overlap removal
+        if self.overlap_m > 0:
+            cells_to_crop = int(np.ceil(self.overlap_m / self.resolution_m))
+            # Check if cropping is possible
+            if cells_to_crop == 0:
+                self.crop_slice = np.s_[:self.n_rows, :self.n_cols]
+            elif cells_to_crop * 2 < self.n_rows and cells_to_crop * 2 < self.n_cols:
+                self.crop_slice = np.s_[cells_to_crop:-cells_to_crop, cells_to_crop:-cells_to_crop]
+            else:
+                # Overlap is too large relative to matrix size
+                self.crop_slice = np.s_[:self.n_rows, :self.n_cols]
+        else:
+            self.crop_slice = np.s_[:self.n_rows, :self.n_cols]
+
+    def get_matrix(self, matrix_type: str = 'presence') -> np.ndarray:
         """
-        Calculate all parameters needed for rasterization.
+        Get a specific matrix by type.
         
-        Parameters
-        ----------
-        bounds : tuple or None
-            (x_min, y_min, x_max, y_max) in the projected CRS (meters).
-            If None, use the bounding box of all buildings.
-        
-        Returns
-        -------
-        tuple
-            (out_shape, transform, bounds)
+        Args:
+            matrix_type: 'presence', ['count', or 'height' for future]
+            remove_overlap: If True, return matrix without overlap
+            
+        Returns:
+            Requested matrix array
         """
-        x_min, y_min, x_max, y_max = bounds
+        if matrix_type not in self.matrixs:
+            available = list(self.matrixs.keys())
+            raise ValueError(f"matrix type '{matrix_type}' not created. Available: {available}")
         
-        # Calculate grid dimensions in pixels
-        width = int(np.ceil((x_max - x_min) / self.resolution_m))
-        height = int(np.ceil((y_max - y_min) / self.resolution_m))
+        matrix = self.matrixs[matrix_type]
         
-        # Create affine transform: origin at top-left corner
-        transform = from_origin(
-            x_min,              # west edge
-            y_max,              # north edge (note: y_max, not y_min)
-            self.resolution_m,  # cell width in meters
-            self.resolution_m   # cell height in meters
-        )
-        
-        out_shape = (height, width)
-        return out_shape, transform, (x_min, y_min, x_max, y_max)
+        return matrix
