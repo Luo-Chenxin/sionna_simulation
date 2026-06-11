@@ -423,3 +423,106 @@ class OSMToPLY:
             f.write("3 0 0 0\n")
         
         print(f"Empty PLY file saved to: {self.ply_path}")
+
+def generate_flat_terrain_ply(
+    output_path: Path,
+    x_min: int, 
+    x_max: int, 
+    y_min: int, 
+    y_max: int, 
+    resolution: float,
+    height: float,
+) -> Path:
+    """
+    Generate a flat terrain mesh as PLY file covering a given Lambert93 area.
+
+    The terrain is a regular grid of triangles at a constant height.
+
+    Parameters
+    ----------
+    output_path : Path
+        Path where the PLY file will be saved
+    x_min : int
+        x_min in Lambert93 CRS
+    x_max : int
+        x_max in Lambert93 CRS
+    y_min : int
+        y_min in Lambert93 CRS
+    y_max : int
+        y_max in Lambert93 CRS
+    resolution : float
+        Grid cell size in meters
+    height : float
+        Constant Z height for all terrain vertices
+
+    Returns
+    -------
+    Path
+        Path to the generated PLY file
+
+    Raises
+    ------
+    ValueError
+        If resolution is not positive
+    """
+    if resolution <= 0:
+        raise ValueError(f"Resolution must be positive, got {resolution}")
+
+    # Calculate grid dimensions
+    x_count = int((x_max - x_min) / resolution) + 1
+    y_count = int((y_max - y_min) / resolution) + 1
+
+    print(f"Generating terrain grid: {x_count} x {y_count} = {x_count * y_count} vertices")
+
+    # Generate vertex grid
+    vertices = []
+    for j in range(y_count):
+        y = y_min + j * resolution
+        for i in range(x_count):
+            x = x_min + i * resolution
+            vertices.append((x, y, height))
+
+    vertices = np.array(vertices)
+
+    # Generate triangle faces (two triangles per grid cell)
+    faces = []
+    for j in range(y_count - 1):
+        for i in range(x_count - 1):
+            v00 = j * x_count + i
+            v10 = j * x_count + i + 1
+            v01 = (j + 1) * x_count + i
+            v11 = (j + 1) * x_count + i + 1
+
+            faces.append([v00, v10, v11])
+            faces.append([v00, v11, v01])
+
+    faces = np.array(faces)
+
+    # Write PLY file
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(output_path, 'w') as f:
+        f.write("ply\n")
+        f.write("format ascii 1.0\n")
+        f.write(f"comment Flat terrain in Lambert93\n")
+        f.write(f"comment Bounds: X=[{x_min:.1f}, {x_max:.1f}], Y=[{y_min:.1f}, {y_max:.1f}]\n")
+        f.write(f"comment Resolution: {resolution}m, Height: {height}m\n")
+        f.write(f"element vertex {len(vertices)}\n")
+        f.write("property float x\n")
+        f.write("property float y\n")
+        f.write("property float z\n")
+        f.write(f"element face {len(faces)}\n")
+        f.write("property list uchar int vertex_indices\n")
+        f.write("end_header\n")
+
+        for v in vertices:
+            f.write(f"{v[0]:.6f} {v[1]:.6f} {v[2]:.6f}\n")
+
+        for face in faces:
+            f.write(f"3 {face[0]} {face[1]} {face[2]}\n")
+
+    print(f"PLY saved to: {output_path}")
+    print(f"  Vertices: {len(vertices)}, Faces: {len(faces)}")
+    print(f"  Area: {(x_max - x_min)}m x {(y_max - y_min)}m")
+
+    return output_path
