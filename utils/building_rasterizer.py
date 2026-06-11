@@ -120,11 +120,14 @@ class BuildingRasterizer:
         """
         Get a specific matrix by type.
         
-        Args:
-            matrix_type: 'presence', ['count', or 'height' for future]
-            remove_overlap: If True, return matrix without overlap
+        Parameters
+        ----------
+        matrix_type: str 
+            'presence', ['count', or 'height' for future]
             
-        Returns:
+        Returns
+        -------
+        ndarray
             Requested matrix array
         """
         if matrix_type not in self.matrixs:
