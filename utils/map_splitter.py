@@ -13,10 +13,16 @@ class BlockMeta:
     x_end: int
     y_start: int
     y_end: int
+    # Latitude and longitude with overlap
     lat_min: float
     lat_max: float
     lon_min: float
     lon_max: float
+    # Latitude and longitude coordinates without overlap (core area)
+    lat_min_core: float
+    lat_max_core: float
+    lon_min_core: float
+    lon_max_core: float
     overlap_m: int
 
 class TileSplitter:
@@ -66,39 +72,48 @@ class TileSplitter:
         Get Lat/Lon bounds for one block.
         row: index from 0 to rows-1
         col: index from 0 to cols-1
-        with_overlap: True for Sionna simulation, False for final data crop.
         """
         if not (0 <= row < self.rows and 0 <= col < self.cols):
             raise ValueError("Index out of range!")
             
-        # Calculate block corners in meters (no overlap).
-        x_start = self.x_min + col * self.block_size_m
-        x_end = x_start + self.block_size_m
-        y_start = self.y_min + row * self.block_size_m
-        y_end = y_start + self.block_size_m
+        # Calculate core block corners in meters (no overlap)
+        x_start_core = self.x_min + col * self.block_size_m
+        x_end_core = x_start_core + self.block_size_m
+        y_start_core = self.y_min + row * self.block_size_m
+        y_end_core = y_start_core + self.block_size_m
         
-        # Add overlap buffer
-        x_start -= self.overlap_m
-        x_end += self.overlap_m
-        y_start -= self.overlap_m
-        y_end += self.overlap_m
+        # Add overlap buffer for extended block
+        x_start_ext = x_start_core - self.overlap_m
+        x_end_ext = x_end_core + self.overlap_m
+        y_start_ext = y_start_core - self.overlap_m
+        y_end_ext = y_end_core + self.overlap_m
             
-        # Change meters back to Lat/Lon.
-        lon_1_block, lat_1_block = self.to_latlon.transform(x_start, y_start)
-        lon_2_block, lat_2_block = self.to_latlon.transform(x_end, y_end)
+        # Transform core meters to Lat/Lon (without overlap)
+        lon_core_1, lat_core_1 = self.to_latlon.transform(x_start_core, y_start_core)
+        lon_core_2, lat_core_2 = self.to_latlon.transform(x_end_core, y_end_core)
         
+        # Transform extended meters to Lat/Lon (with overlap)
+        lon_ext_1, lat_ext_1 = self.to_latlon.transform(x_start_ext, y_start_ext)
+        lon_ext_2, lat_ext_2 = self.to_latlon.transform(x_end_ext, y_end_ext)
+            
         return BlockMeta(
             row=row,
             col=col,
             name=f"block_{row}_{col}",
-            block_size_m = self.block_size_m,
-            x_start=x_start, x_end=x_end,
-            y_start=y_start, y_end=y_end,
-            lat_min=min(lat_1_block, lat_2_block),
-            lat_max=max(lat_1_block, lat_2_block),
-            lon_min=min(lon_1_block, lon_2_block),
-            lon_max=max(lon_1_block, lon_2_block),
-            overlap_m= self.overlap_m
+            block_size_m=self.block_size_m,
+            x_start=x_start_ext, x_end=x_end_ext,
+            y_start=y_start_ext, y_end=y_end_ext,
+            # Latitude and longitude boundaries with overlap
+            lat_min=min(lat_ext_1, lat_ext_2),
+            lat_max=max(lat_ext_1, lat_ext_2),
+            lon_min=min(lon_ext_1, lon_ext_2),
+            lon_max=max(lon_ext_1, lon_ext_2),
+            # Latitude and longitude boundaries without overlap (core area)
+            lat_min_core=min(lat_core_1, lat_core_2),
+            lat_max_core=max(lat_core_1, lat_core_2),
+            lon_min_core=min(lon_core_1, lon_core_2),
+            lon_max_core=max(lon_core_1, lon_core_2),
+            overlap_m=self.overlap_m
         )
 
     def get_all_blocks(self):
