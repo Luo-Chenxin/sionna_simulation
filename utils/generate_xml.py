@@ -1,7 +1,7 @@
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Dict
 
 class SionnaXMLGenerator:
     """
@@ -169,7 +169,7 @@ class SionnaXMLGenerator:
             # Add filename reference
             ET.SubElement(shape, "string", {
                 "name": "filename",
-                "value": f"meshes/{mesh_filename}"
+                "value": f"{mesh_path}"
             })
             
             # Add face normals

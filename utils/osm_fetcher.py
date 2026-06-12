@@ -75,6 +75,12 @@ class OSMFetcher:
     ):
         """
         Initialize the fetcher, configure cache, and automatically fetch the base data.
+        
+        Parameters
+        ----------
+        bbox
+            Bounding box as `(left, bottom, right, top)`. Coordinates should be in
+            unprojected latitude-longitude degrees (EPSG:4326).
         """
         # Configure osmnx cache to save time and network data
         ox.settings.use_cache = True
@@ -144,7 +150,7 @@ class OSMFetcher:
             elif isinstance(val, str):
                 # Match rows where the column value exactly equals the string
                 # Also handle list-like string columns from OSM (semicolon-separated)
-                current_condition = (col == val) | col.str.contains(f'(^|;){val}(;|$)', na=False, regex=True)
+                current_condition = (col == val) | col.str.contains(f'(?:^|;){val}(?:;|$)', na=False, regex=True)
             elif isinstance(val, list):
                 # Match rows where the column value is in the list
                 # Also handle list-like string columns
@@ -152,7 +158,7 @@ class OSMFetcher:
                 list_condition = pd.Series(False, index=col.index)
                 for v in val:
                     if isinstance(v, str):
-                        list_condition |= col.str.contains(f'(^|;){v}(;|$)', na=False, regex=True)
+                        list_condition |= col.str.contains(f'(?:^|;){v}(?:;|$)', na=False, regex=True)
                 current_condition = base_condition | list_condition
             else:
                 continue

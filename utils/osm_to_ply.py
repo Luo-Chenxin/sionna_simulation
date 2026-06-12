@@ -340,11 +340,11 @@ class OSMToPLY:
     
     def save_to_ply(self):
         """
-        Export the merged polygon mesh to PLY file format.
+        Export the merged polygon mesh to binary PLY file format.
         
         Converts the merged 3D polygon to a triangulated mesh and writes
-        it in standard PLY format with vertex positions and face indices.
-        Guarantees output is a valid PLY file even for empty geometries.
+        it in binary PLY format for fast parsing. Guarantees output is 
+        a valid PLY file even for empty geometries.
         
         Raises
         ------
@@ -366,6 +366,10 @@ class OSMToPLY:
             self._write_empty_ply()
             return
         
+        # Convert to correct data types for binary writing
+        vertices = np.asarray(vertices, dtype=np.float32)
+        faces = np.asarray(faces, dtype=np.int32)
+        
         # Calculate height statistics for verification
         heights = vertices[:, 2] if vertices.shape[1] >= 3 else np.zeros(len(vertices))
         unique_heights = len(set(np.round(heights, 2)))
@@ -373,35 +377,37 @@ class OSMToPLY:
         # Ensure output directory exists
         self.ply_path.parent.mkdir(parents=True, exist_ok=True)
         
-        # Write PLY file
-        with open(self.ply_path, 'w') as f:
-            # Header
-            f.write("ply\n")
-            f.write("format ascii 1.0\n")
-            f.write(f"element vertex {len(vertices)}\n")
-            f.write("property float x\n")
-            f.write("property float y\n")
-            f.write("property float z\n")
-            f.write(f"element face {len(faces)}\n")
-            f.write("property list uchar int vertex_indices\n")
-            f.write("end_header\n")
+        # Write binary PLY file
+        with open(self.ply_path, 'wb') as f:
+            # Write ASCII header
+            header = f"""ply
+format binary_little_endian 1.0
+element vertex {len(vertices)}
+property float x
+property float y
+property float z
+element face {len(faces)}
+property list uchar int vertex_indices
+end_header
+"""
+            f.write(header.encode('ascii'))
             
-            # Vertex data
-            for vertex in vertices:
-                f.write(f"{vertex[0]:.6f} {vertex[1]:.6f} {vertex[2]:.6f}\n")
+            # Write vertex data as float32
+            vertices.tofile(f)
             
-            # Face data
+            # Write face data: each face starts with vertex count (3)
             for face in faces:
-                f.write(f"3 {face[0]} {face[1]} {face[2]}\n")
+                f.write(bytes([3]))
+                face.tofile(f)
         
-        print(f"PLY file saved to: {self.ply_path}")
+        print(f"Binary PLY file saved to: {self.ply_path}")
         print(f"Vertices: {len(vertices)}, Faces: {len(faces)}")
         print(f"Height range: {heights.min():.2f} to {heights.max():.2f} "
-              f"(unique heights: {unique_heights})")
+            f"(unique heights: {unique_heights})")
     
     def _write_empty_ply(self):
         """
-        Write a minimal valid PLY file for empty geometry.
+        Write a minimal valid binary PLY file for empty geometry.
         
         Creates a PLY file with a single degenerate triangle to ensure
         the file is always valid PLY format.
@@ -409,20 +415,30 @@ class OSMToPLY:
         # Ensure output directory exists
         self.ply_path.parent.mkdir(parents=True, exist_ok=True)
         
-        with open(self.ply_path, 'w') as f:
-            f.write("ply\n")
-            f.write("format ascii 1.0\n")
-            f.write("element vertex 1\n")
-            f.write("property float x\n")
-            f.write("property float y\n")
-            f.write("property float z\n")
-            f.write("element face 1\n")
-            f.write("property list uchar int vertex_indices\n")
-            f.write("end_header\n")
-            f.write("0.000000 0.000000 0.000000\n")
-            f.write("3 0 0 0\n")
+        with open(self.ply_path, 'wb') as f:
+            # Write ASCII header
+            header = """ply
+format binary_little_endian 1.0
+element vertex 1
+property float x
+property float y
+property float z
+element face 1
+property list uchar int vertex_indices
+end_header
+"""
+            f.write(header.encode('ascii'))
+            
+            # Write one vertex at origin
+            vertex = np.array([[0.0, 0.0, 0.0]], dtype=np.float32)
+            vertex.tofile(f)
+            
+            # Write one degenerate face
+            f.write(bytes([3]))
+            face = np.array([0, 0, 0], dtype=np.int32)
+            face.tofile(f)
         
-        print(f"Empty PLY file saved to: {self.ply_path}")
+        print(f"Empty binary PLY file saved to: {self.ply_path}")
 
 def generate_flat_terrain_ply(
     output_path: Path,
@@ -434,7 +450,7 @@ def generate_flat_terrain_ply(
     height: float,
 ) -> Path:
     """
-    Generate a flat terrain mesh as PLY file covering a given Lambert93 area.
+    Generate a flat terrain mesh as binary PLY file covering a given Lambert93 area.
 
     The terrain is a regular grid of triangles at a constant height.
 
@@ -472,56 +488,65 @@ def generate_flat_terrain_ply(
     x_count = int((x_max - x_min) / resolution) + 1
     y_count = int((y_max - y_min) / resolution) + 1
 
-    print(f"Generating terrain grid: {x_count} x {y_count} = {x_count * y_count} vertices")
-
-    # Generate vertex grid
-    vertices = []
-    for j in range(y_count):
-        y = y_min + j * resolution
-        for i in range(x_count):
-            x = x_min + i * resolution
-            vertices.append((x, y, height))
-
-    vertices = np.array(vertices)
+    # Generate vertex grid using meshgrid for efficiency
+    x_coords = np.linspace(x_min, x_max, x_count, dtype=np.float32)
+    y_coords = np.linspace(y_min, y_max, y_count, dtype=np.float32)
+    xx, yy = np.meshgrid(x_coords, y_coords)
+    
+    # Build vertices array
+    total_vertices = x_count * y_count
+    vertices = np.zeros((total_vertices, 3), dtype=np.float32)
+    vertices[:, 0] = xx.ravel()
+    vertices[:, 1] = yy.ravel()
+    vertices[:, 2] = height
 
     # Generate triangle faces (two triangles per grid cell)
-    faces = []
+    total_faces = (x_count - 1) * (y_count - 1) * 2
+    faces = np.zeros((total_faces, 3), dtype=np.int32)
+    
+    face_idx = 0
     for j in range(y_count - 1):
+        row_start = j * x_count
+        next_row_start = (j + 1) * x_count
         for i in range(x_count - 1):
-            v00 = j * x_count + i
-            v10 = j * x_count + i + 1
-            v01 = (j + 1) * x_count + i
-            v11 = (j + 1) * x_count + i + 1
+            v00 = row_start + i
+            v10 = v00 + 1
+            v01 = next_row_start + i
+            v11 = v01 + 1
 
-            faces.append([v00, v10, v11])
-            faces.append([v00, v11, v01])
+            faces[face_idx] = [v00, v10, v11]
+            faces[face_idx + 1] = [v00, v11, v01]
+            face_idx += 2
 
-    faces = np.array(faces)
-
-    # Write PLY file
+    # Write binary PLY file
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with open(output_path, 'w') as f:
-        f.write("ply\n")
-        f.write("format ascii 1.0\n")
-        f.write(f"comment Flat terrain in Lambert93\n")
-        f.write(f"comment Bounds: X=[{x_min:.1f}, {x_max:.1f}], Y=[{y_min:.1f}, {y_max:.1f}]\n")
-        f.write(f"comment Resolution: {resolution}m, Height: {height}m\n")
-        f.write(f"element vertex {len(vertices)}\n")
-        f.write("property float x\n")
-        f.write("property float y\n")
-        f.write("property float z\n")
-        f.write(f"element face {len(faces)}\n")
-        f.write("property list uchar int vertex_indices\n")
-        f.write("end_header\n")
-
-        for v in vertices:
-            f.write(f"{v[0]:.6f} {v[1]:.6f} {v[2]:.6f}\n")
-
+    with open(output_path, 'wb') as f:
+        # Write ASCII header
+        header = f"""ply
+format binary_little_endian 1.0
+comment Flat terrain in Lambert93
+comment Bounds: X=[{x_min:.1f}, {x_max:.1f}], Y=[{y_min:.1f}, {y_max:.1f}]
+comment Resolution: {resolution}m, Height: {height}m
+element vertex {len(vertices)}
+property float x
+property float y
+property float z
+element face {len(faces)}
+property list uchar int vertex_indices
+end_header
+"""
+        f.write(header.encode('ascii'))
+        
+        # Write all vertices at once
+        vertices.tofile(f)
+        
+        # Write faces with vertex count prefix
         for face in faces:
-            f.write(f"3 {face[0]} {face[1]} {face[2]}\n")
+            f.write(bytes([3]))
+            face.tofile(f)
 
-    print(f"PLY saved to: {output_path}")
+    print(f"Binary PLY saved to: {output_path}")
     print(f"  Vertices: {len(vertices)}, Faces: {len(faces)}")
     print(f"  Area: {(x_max - x_min)}m x {(y_max - y_min)}m")
 
