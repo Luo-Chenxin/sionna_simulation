@@ -3,6 +3,104 @@ import geopandas as gpd
 from shapely.geometry import Polygon, MultiPolygon
 from pathlib import Path
 from config import LocalCRS
+from utils.map_splitter import BlockMeta
+
+def extract_polygon_data(poly, offset_x, offset_y):
+    """Extract vertices and create faces for a single polygon including walls."""
+    verts = []
+    face_list = []
+    
+    # Get exterior ring vertices
+    exterior_coords = list(poly.exterior.coords)
+    
+    if len(exterior_coords) == 0:
+        return verts, face_list
+    
+    # Handle both 2D and 3D coordinates
+    if len(exterior_coords[0]) == 2:
+        exterior_verts_roof = [(x - offset_x, y - offset_y, 0.0) for x, y in exterior_coords]
+    else:
+        exterior_verts_roof = [(x - offset_x, y - offset_y, z) for x, y, z in exterior_coords]
+
+    # Create ground vertices (z=0)
+    exterior_verts_ground = [(x, y, 0.0) for x, y, z in exterior_verts_roof]
+    
+    # Get the roof height (use first vertex's z coordinate)
+    roof_height = exterior_verts_roof[0][2]
+    
+    # ---- ROOF (top face) ----
+    roof_start_idx  = len(verts)
+    # Exclude last point (same as first)
+    verts.extend(exterior_verts_roof[:-1])
+    
+    # Create fan triangulation for roof
+    for i in range(1, len(exterior_verts_roof) - 2):
+        face_list.append([roof_start_idx, roof_start_idx + i, roof_start_idx + i + 1])
+
+    # ---- GROUND (bottom face) ----
+    ground_start_idx = len(verts)
+    verts.extend(exterior_verts_ground[:-1])
+    
+    # Create fan triangulation for ground (reversed for downward facing)
+    for i in range(1, len(exterior_verts_ground) - 2):
+        face_list.append([ground_start_idx, ground_start_idx + i + 1, ground_start_idx + i])
+    
+    # ---- WALLS (vertical faces) ----
+    num_roof_verts = len(exterior_verts_roof) - 1  # Number of unique vertices
+    
+    for i in range(num_roof_verts):
+        # Indices for the four corners of this wall segment
+        roof_i = roof_start_idx + i
+        roof_next = roof_start_idx + ((i + 1) % num_roof_verts)
+        ground_i = ground_start_idx + i
+        ground_next = ground_start_idx + ((i + 1) % num_roof_verts)
+        
+        # Skip walls at height 0 (no wall needed)
+        if roof_height == 0.0:
+            continue
+        
+        # Two triangles per wall segment
+        face_list.append([roof_i, ground_i, ground_next])
+        face_list.append([roof_i, ground_next, roof_next])
+    
+    # Process interior rings (holes)
+    for interior in poly.interiors:
+        interior_coords = list(interior.coords)
+        
+        if len(interior_coords) == 0:
+            continue
+        
+        if len(interior_coords[0]) == 2:
+            interior_verts_roof  = [(x - offset_x, y - offset_y, 0.0) for x, y in interior_coords]
+        else:
+            interior_verts_roof  = [(x - offset_x, y - offset_y, z) for x, y, z in interior_coords]
+
+        interior_verts_ground = [(x, y, 0.0) for x, y, z in interior_verts_roof]
+        
+        hole_roof_start = len(verts)
+        verts.extend(interior_verts_roof [:-1])
+
+        # Ground for hole
+        hole_ground_start = len(verts)
+        verts.extend(interior_verts_ground[:-1])
+
+        # Walls for hole (reverse orientation for inward facing)
+        num_hole_verts = len(interior_verts_roof) - 1
+        
+        # Fan triangulation for holes (reversed for correct orientation)
+        for i in range(1, len(interior_verts_roof ) - 2):
+            if roof_height == 0.0:
+                continue
+            roof_i = hole_roof_start + i
+            roof_next = hole_roof_start + ((i + 1) % num_hole_verts)
+            ground_i = hole_ground_start + i
+            ground_next = hole_ground_start + ((i + 1) % num_hole_verts)
+            
+            # Reverse order for holes (facing inward)
+            face_list.append([roof_i, ground_next, ground_i])
+            face_list.append([roof_i, roof_next, ground_next])
+    
+    return verts, face_list
 
 
 class OSMToPLY:
@@ -13,7 +111,12 @@ class OSMToPLY:
     and exports to PLY format with LocalCRS.FRANCE_LAMBERT93 coordination system.
     """
     
-    def __init__(self, gdf: gpd.GeoDataFrame, ply_path: Path, default_height: float):
+    def __init__(
+            self, 
+            gdf: gpd.GeoDataFrame, 
+            ply_path: Path, 
+            default_height: float, 
+            block_meta:BlockMeta):
         """
         Initialize the converter with input data and parameters.
         
@@ -25,6 +128,7 @@ class OSMToPLY:
             Output PLY file path
         default_height : float
             Default height value for polygons without height information
+        block_meta : BlockMeta
         """
         self.original_gdf = gdf.copy()
         self.ply_path = ply_path
@@ -32,6 +136,11 @@ class OSMToPLY:
         
         # Convert to local CRS
         self.gdf = gdf.to_crs(LocalCRS.FRANCE_LAMBERT93.crs)
+        
+        # Calculate center point of the gdf
+        self.center_x = (block_meta.x_start + block_meta.x_end) / 2.0
+        self.center_y = (block_meta.y_start + block_meta.y_end) / 2.0
+        print(f"Center point: ({self.center_x:.2f}, {self.center_y:.2f})")
         
         # Process polygons: extract heights and convert to 3D
         if default_height == 0.0:
@@ -99,13 +208,12 @@ class OSMToPLY:
         
         self.processed_geoms = processed_geoms
         print(f"Processed {len(processed_geoms)} polygons with 3D coordinates")
-    
+
     def _extract_height_from_row(self, row):
         """
         Extract height value from GeoDataFrame row attributes.
         
-        Attempts to find height information from common attribute names
-        (height, building:height, levels, etc.) and falls back to None.
+        Attempts to find height information from 'height' and 'building:levels' attributes.
         
         Parameters
         ----------
@@ -117,21 +225,33 @@ class OSMToPLY:
         float or None
             Extracted height value, or None if not found
         """
-        # Common height-related column names in OSM data
-        height_columns = ['height', 'building:height', 'levels', 'building:levels']
         
-        for col in height_columns:
-            if col in row.index and row[col] is not None:
-                try:
-                    value = float(row[col])
-                    if col in ('levels', 'building:levels'):
-                        # Convert number of levels to approximate height (3m per level)
-                        return value * 3.0
+        # Check 'height' attribute first
+        if 'height' in row.index and row['height'] is not None:
+            height_value = row['height']
+            
+            try:
+                value = float(height_value)
+                # Check if it's a meaningful number (not NaN)
+                if not np.isnan(value):
                     return value
-                except (ValueError, TypeError):
-                    continue
+            except (ValueError, TypeError):
+                pass
         
-        # No height information found
+        # Check 'building:levels' attribute
+        if 'building:levels' in row.index and row['building:levels'] is not None:
+            levels_value = row['building:levels']
+            
+            try:
+                value = float(levels_value)
+                # Check if it's a meaningful number (not NaN)
+                if not np.isnan(value):
+                    # Convert number of levels to approximate height (3m per level)
+                    return value * 3.0
+            except (ValueError, TypeError):
+                pass
+        
+        # No valid height information found
         return None
     
     def _assign_height_to_polygon(self, polygon, height):
@@ -276,57 +396,11 @@ class OSMToPLY:
         if polygon.is_empty:
             return np.array([]).reshape(0, 3), np.array([]).reshape(0, 3)
         
-        def extract_polygon_data(poly):
-            """Extract vertices and create faces for a single polygon."""
-            verts = []
-            face_list = []
-            
-            # Get exterior ring vertices
-            exterior_coords = list(poly.exterior.coords)
-            
-            if len(exterior_coords) == 0:
-                return verts, face_list
-            
-            # Handle both 2D and 3D coordinates
-            if len(exterior_coords[0]) == 2:
-                exterior_verts = [(x, y, 0.0) for x, y in exterior_coords]
-            else:
-                exterior_verts = [(x, y, z) for x, y, z in exterior_coords]
-            
-            start_idx = len(verts)
-            # Exclude last point (same as first)
-            verts.extend(exterior_verts[:-1])
-            
-            # Create fan triangulation from first vertex
-            for i in range(1, len(exterior_verts) - 2):
-                face_list.append([start_idx, start_idx + i, start_idx + i + 1])
-            
-            # Process interior rings (holes)
-            for interior in poly.interiors:
-                interior_coords = list(interior.coords)
-                
-                if len(interior_coords) == 0:
-                    continue
-                
-                if len(interior_coords[0]) == 2:
-                    interior_verts = [(x, y, 0.0) for x, y in interior_coords]
-                else:
-                    interior_verts = [(x, y, z) for x, y, z in interior_coords]
-                
-                hole_start_idx = len(verts)
-                verts.extend(interior_verts[:-1])
-                
-                # Fan triangulation for holes (reversed for correct orientation)
-                for i in range(1, len(interior_verts) - 2):
-                    face_list.append([hole_start_idx, hole_start_idx + i + 1, hole_start_idx + i])
-            
-            return verts, face_list
-        
         if polygon.geom_type == 'Polygon':
-            vertices, faces = extract_polygon_data(polygon)
+            vertices, faces = extract_polygon_data(polygon, self.center_x, self.center_y)
         elif polygon.geom_type == 'MultiPolygon':
             for poly in polygon.geoms:
-                poly_verts, poly_faces = extract_polygon_data(poly)
+                poly_verts, poly_faces = extract_polygon_data(poly, self.center_x, self.center_y)
                 
                 # Adjust face indices for existing vertices
                 offset = len(vertices)
@@ -448,6 +522,7 @@ def generate_flat_terrain_ply(
     y_max: int, 
     resolution: float,
     height: float,
+    expand_m: int
 ) -> Path:
     """
     Generate a flat terrain mesh as binary PLY file covering a given Lambert93 area.
@@ -470,7 +545,8 @@ def generate_flat_terrain_ply(
         Grid cell size in meters
     height : float
         Constant Z height for all terrain vertices
-
+    expand_m : int
+        The distance (in meters) that extends outward.
     Returns
     -------
     Path
@@ -483,21 +559,31 @@ def generate_flat_terrain_ply(
     """
     if resolution <= 0:
         raise ValueError(f"Resolution must be positive, got {resolution}")
+    
+    # Extended Boundary
+    x_min = x_min - expand_m
+    x_max = x_max + expand_m
+    y_min = y_min - expand_m
+    y_max = y_max + expand_m
+    
+    # Calculate center point for offset
+    offset_x = (x_min + x_max) / 2.0
+    offset_y = (y_min + y_max) / 2.0
 
     # Calculate grid dimensions
-    x_count = int((x_max - x_min) / resolution) + 1
-    y_count = int((y_max - y_min) / resolution) + 1
+    x_count = int((x_max - x_min) / resolution)
+    y_count = int((y_max - y_min) / resolution)
 
     # Generate vertex grid using meshgrid for efficiency
     x_coords = np.linspace(x_min, x_max, x_count, dtype=np.float32)
     y_coords = np.linspace(y_min, y_max, y_count, dtype=np.float32)
     xx, yy = np.meshgrid(x_coords, y_coords)
     
-    # Build vertices array
+    # Build vertices array with offset
     total_vertices = x_count * y_count
     vertices = np.zeros((total_vertices, 3), dtype=np.float32)
-    vertices[:, 0] = xx.ravel()
-    vertices[:, 1] = yy.ravel()
+    vertices[:, 0] = xx.ravel() - offset_x
+    vertices[:, 1] = yy.ravel() - offset_y
     vertices[:, 2] = height
 
     # Generate triangle faces (two triangles per grid cell)
