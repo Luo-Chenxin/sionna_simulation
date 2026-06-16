@@ -189,7 +189,7 @@ class OSMFetcher:
             # Generate unique cache prefix based on bbox and tags
             cache_key = hashlib.md5(f"{bbox}{sorted(tags.keys())}".encode()).hexdigest()[:8]
             
-            all_gdfs = []
+            tmp_files = []
             for i in range(n_splits):
                 for j in range(n_splits):
                     sub_bbox = (lon_edges[j], lat_edges[i], lon_edges[j+1], lat_edges[i+1])
@@ -198,15 +198,8 @@ class OSMFetcher:
                     # Check if chunk already downloaded
                     if chunk_file.exists():
                         print(f"  Chunk ({i},{j}): loading from cache {chunk_file.name}")
-                        try:
-                            gdf_chunk = gpd.read_file(chunk_file)
-                            if not gdf_chunk.empty:
-                                all_gdfs.append(gdf_chunk)
-                                print(f"    -> {len(gdf_chunk)} features (cached)")
-                            continue
-                        except Exception as e:
-                            print(f"    -> Cache corrupted, re-downloading: {e}")
-                            chunk_file.unlink(missing_ok=True)
+                        tmp_files.append(chunk_file)
+                        continue
                     
                     print(f"  Chunk ({i},{j}): downloading...")
                     try:
@@ -214,8 +207,9 @@ class OSMFetcher:
                         if not gdf_chunk.empty:
                             # Save chunk immediately
                             gdf_chunk.to_file(chunk_file, driver="GPKG")
-                            all_gdfs.append(gdf_chunk)
+                            tmp_files.append(chunk_file)
                             print(f"    -> {len(gdf_chunk)} features (saved to cache)")
+                            del gdf_chunk
                         else:
                             # Create empty file as marker to skip next time
                             chunk_file.touch()
@@ -224,13 +218,12 @@ class OSMFetcher:
                         print(f"    -> Failed: {e}")
                         # Don't create cache file on failure, so it retries next time
             
-            if all_gdfs:
-                self._raw_gdf = pd.concat(all_gdfs, ignore_index=True)
-                # Drop duplicates at chunk boundaries
-                if 'osmid' in self._raw_gdf.columns and 'element_type' in self._raw_gdf.columns:
-                    before = len(self._raw_gdf)
-                    self._raw_gdf = self._raw_gdf.drop_duplicates(subset=['osmid', 'element_type'])
-                    print(f"Dropped {before - len(self._raw_gdf)} duplicates, {len(self._raw_gdf)} features remaining")
+            if tmp_files:
+                self._raw_gdf = gpd.GeoDataFrame()
+                for tmp_file in tmp_files:
+                    chunk = gpd.read_file(tmp_file)
+                    self._raw_gdf = pd.concat([self._raw_gdf, chunk], ignore_index=True)
+                    del chunk
             else:
                 print("Warning: No data found for the given box and tags.")
                 self._raw_gdf = gpd.GeoDataFrame()
@@ -275,17 +268,17 @@ class OSMFetcher:
             A filtered copy of the GeoDataFrame.
         """
         if self._raw_gdf.empty:
-            return self._raw_gdf.copy()
+            return self._raw_gdf
         
         # Start with all features
-        filtered_gdf = self._raw_gdf.copy()
+        filtered_gdf = self._raw_gdf
         
         # Apply spatial filter if a sub-bbox is provided
         if sub_bbox is not None:
             left, bottom, right, top = sub_bbox
             clip_box = box(left, bottom, right, top)
             spatial_mask = filtered_gdf.intersects(clip_box)
-            filtered_gdf = filtered_gdf[spatial_mask].copy()
+            filtered_gdf = filtered_gdf[spatial_mask]
         
         # Apply tag filter if provided
         if filter_tags is not None:
@@ -324,6 +317,6 @@ class OSMFetcher:
                 # Use OR to combine: match if ANY tag condition is met
                 combined_condition |= current_condition
                 
-            filtered_gdf = filtered_gdf[combined_condition].copy()
+            filtered_gdf = filtered_gdf[combined_condition]
         
-        return filtered_gdf
+        return filtered_gdf.copy()
