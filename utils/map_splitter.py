@@ -2,6 +2,9 @@ import numpy as np
 from pyproj import Transformer
 from config import LocalCRS
 from dataclasses import dataclass
+from typing import Dict, List
+from pathlib import Path
+import pandas as pd
 
 @dataclass
 class BlockMeta:
@@ -116,16 +119,57 @@ class TileSplitter:
             overlap_m=self.overlap_m
         )
 
-    def get_all_blocks(self):
+    def get_all_blocks(self, tx_csv_path:Path):
         """
         Get a list of all block indices and names.
         """
         blocks_list = []
         for r in range(self.rows):
             for c in range(self.cols):
-                blocks_list.append({
-                    "row": r,
-                    "col": c,
-                    "name": f"block_{r}_{c}"
-                })
+                block_meta = self.get_block_latlon_bounds(r, c)
+                if self._is_block_valid(block_meta, tx_csv_path):
+                    blocks_list.append({
+                        "row": r,
+                        "col": c,
+                        "name": f"block_{r}_{c}"
+                    })
+        print(f"Total valid blocks: {len(blocks_list)}")
         return blocks_list
+    
+    def _is_block_valid(
+        self, 
+        block_meta: BlockMeta,
+        tx_csv_path: Path
+    ) -> bool:
+        """
+        Determine if the block is valid.
+        Valid: There are some transmitters in this block;
+        Invalid: No transmitter is in this block
+
+        Parameters
+        ----------
+        block_meta: BlockMeta
+        tx_csv_path : Path
+            Path to the transmitter CSV file.
+        
+        Returns
+        -------
+        bool
+        """
+        # Load transmitter data from CSV
+        df_tx = pd.read_csv(tx_csv_path)
+        tx_lon = df_tx["Longitude"].to_numpy()
+        tx_lat = df_tx["Latitude"].to_numpy()
+            
+        # Check which transmitters fall inside the core area (no overlap)
+        in_core = (
+            (tx_lon >= block_meta.lon_min_core) &
+            (tx_lon <= block_meta.lon_max_core) &
+            (tx_lat >= block_meta.lat_min_core) &
+            (tx_lat <= block_meta.lat_max_core)
+        )
+        
+        if in_core.any():
+            return True
+        else:
+            return False

@@ -160,16 +160,17 @@ class RadioMapGenerator:
         scene : rt.Scene
             The Sionna scene to modify.
         """
-        scene.objects["water"].radio_material = create_sionna_material(
-            "freshwater", scene.frequency
-        )
-        scene.objects["roads"].radio_material = create_sionna_material(
-            "asphalt_concrete", scene.frequency
-        )
+        if 'water' in scene.objects:
+            scene.objects['water'].radio_material = create_sionna_material(
+                'freshwater', scene.frequency
+            )
+            scene.remove('wet_ground')
 
-        # Clean up materials that were loaded with the scene but are not needed
-        scene.remove("wet_ground")
-        scene.remove("chipboard")
+        if 'roads' in scene.objects:
+            scene.objects['roads'].radio_material = create_sionna_material(
+                'asphalt_concrete', scene.frequency
+            )
+            scene.remove('chipboard')
     
     def _setup_matrix_bounds(self):
         """
