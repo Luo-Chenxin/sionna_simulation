@@ -12,6 +12,7 @@ class H5Manager:
     DATASET_BUILDINGS = "buildings"
     DATASET_TRANSMITTERS = "transmitters"
     DATASET_RADIOMAP = "radiomap"
+    DATASET_SOURCE_MAPPING = "source_mapping"
     
     # --- Attribute Key Constants ---
     ATTR_BLOCK_NAME = "block_name"
@@ -98,7 +99,7 @@ class H5Manager:
         -------
         dict or None
             {'buildings': ndarray, 'transmitters': ndarray, 'radiomap': ndarray,
-             'resolution_m': float, 'overlap_m': int, 'old_block_size': int}
+             'resolution_m': float, 'overlap_m': int, 'old_block_size': int, block_name': str}
             Returns None if the file should be skipped (invalid name or
             has_simulation=False).
         
@@ -121,6 +122,9 @@ class H5Manager:
             if not has_sim:
                 print(f"  [SKIP] has_simulation=False: {file_path.name}")
                 return None
+            
+            # --- Get block name ---
+            block_name = f.attrs[H5Manager.ATTR_BLOCK_NAME]
 
             # --- Validate resolution ---
             resolution_m = f.attrs[H5Manager.ATTR_RESOLUTION]
@@ -163,10 +167,11 @@ class H5Manager:
             "resolution_m": resolution_m,
             "overlap_m": overlap_m,
             "old_block_size": old_block_size,
+            "block_name": block_name,
         }
 
     @staticmethod
-    def _split_and_filter_blocks(datasets, old_block_size, new_block_size_m):
+    def _split_and_filter_blocks(datasets, old_block_size, new_block_size_m, block_name):
         """
         Split datasets into smaller blocks, discarding those where the
         transmitters block is all zeros.
@@ -180,16 +185,19 @@ class H5Manager:
             Original block size in meters.
         new_block_size_m : int
             Target block size in meters.
+        block_name : str
+            Name of the source block.
             
         Returns
         -------
         tuple of lists
-            (buildings_list, transmitters_list, radiomap_list)
+            (buildings_list, transmitters_list, radiomap_list, source_names_list)
             Each list contains 2D ndarrays of shape (new, new).
         """
         buildings_list = []
         transmitters_list = []
         radiomap_list = []
+        source_names_list = []
 
         blocks_per_side = old_block_size // new_block_size_m
         new_size = new_block_size_m
@@ -214,13 +222,14 @@ class H5Manager:
                 radiomap_list.append(
                     datasets["radiomap"][r_start:r_end, c_start:c_end]
                 )
+                source_names_list.append(block_name)
 
-        return buildings_list, transmitters_list, radiomap_list
+        return buildings_list, transmitters_list, radiomap_list, source_names_list
 
     @staticmethod
     def _write_merged_file(output_path, new_block_size_m, resolution_m,
                            overlap_m, total_samples, buildings_array,
-                           transmitters_array, radiomap_array):
+                           transmitters_array, radiomap_array, source_names_array):
         """
         Write the merged HDF5 file.
         
@@ -242,6 +251,8 @@ class H5Manager:
             Transmitters data, shape (N, new, new), dtype uint8.
         radiomap_array : ndarray
             Radiomap data, shape (N, new, new), dtype float32.
+        source_names_array : ndarray
+            Source block names, shape (N,), dtype string.
         """
         with h5py.File(output_path, "w") as f:
             # Write attributes
@@ -269,6 +280,13 @@ class H5Manager:
                 H5Manager.DATASET_RADIOMAP,
                 data=radiomap_array,
                 dtype="float32",
+                compression="gzip",
+            )
+
+            f.create_dataset(
+                H5Manager.DATASET_SOURCE_MAPPING,
+                data=source_names_array,
+                dtype=h5py.string_dtype(encoding='utf-8'),
                 compression="gzip",
             )
 
@@ -306,6 +324,7 @@ class H5Manager:
         all_buildings = []
         all_transmitters = []
         all_radiomap = []
+        all_source_names = []
 
         h5_files = sorted(input_dir.glob("*.h5"))
 
@@ -325,7 +344,7 @@ class H5Manager:
                 overlap_m_ref = result["overlap_m"]
 
             # Split into smaller blocks and filter all-zero transmitters
-            b_list, t_list, r_list = H5Manager._split_and_filter_blocks(
+            b_list, t_list, r_list, s_list = H5Manager._split_and_filter_blocks(
                 {
                     "buildings": result["buildings"],
                     "transmitters": result["transmitters"],
@@ -333,11 +352,13 @@ class H5Manager:
                 },
                 result["old_block_size"],
                 new_block_size_m,
+                result["block_name"],
             )
 
             all_buildings.extend(b_list)
             all_transmitters.extend(t_list)
             all_radiomap.extend(r_list)
+            all_source_names.extend(s_list)
 
         # --- Check for valid samples ---
         total_samples = len(all_buildings)
@@ -349,6 +370,7 @@ class H5Manager:
         buildings_array = np.stack(all_buildings, axis=0)
         transmitters_array = np.stack(all_transmitters, axis=0)
         radiomap_array = np.stack(all_radiomap, axis=0)
+        source_names_array = np.array(all_source_names, dtype=object)
 
         # --- Write merged output ---
         H5Manager._write_merged_file(
@@ -360,8 +382,23 @@ class H5Manager:
             buildings_array,
             transmitters_array,
             radiomap_array,
+            source_names_array,
         )
 
         print(
             f"Successfully merged {total_samples} samples into {output_path}"
         )
+
+    @staticmethod
+    def get_source_block_name(merged_file_path: Path, index: int) -> str:
+        with h5py.File(merged_file_path, "r") as f:
+            if H5Manager.DATASET_SOURCE_MAPPING not in f:
+                raise KeyError(
+                    f"Dataset '{H5Manager.DATASET_SOURCE_MAPPING}' not found in file."
+                )
+            source_mapping = f[H5Manager.DATASET_SOURCE_MAPPING]
+            if index >= len(source_mapping):
+                raise IndexError(
+                    f"Index {index} out of range. Dataset size: {len(source_mapping)}"
+                )
+            return source_mapping[index].decode('utf-8')
