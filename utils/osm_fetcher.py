@@ -6,6 +6,7 @@ from typing import Dict, List, Union, Optional
 from shapely.geometry import box
 from pathlib import Path
 import numpy as np
+import time 
 
 # =============================================================================
 # OSM Feature Tags for ox.features_from_bbox
@@ -96,6 +97,8 @@ class OSMFetcher:
         # Configure osmnx cache to save time and network data
         ox.settings.use_cache = True
         ox.settings.log_console = False
+        # ox.settings.requests_timeout = 180
+        # ox.settings.overpass_url = 'https://overpass.private.coffee/api/interpreter'
         
         # Initialize internal storage
         self._raw_gdf = gpd.GeoDataFrame()
@@ -197,14 +200,26 @@ class OSMFetcher:
                     
                     # Check if chunk already downloaded
                     if chunk_file.exists():
-                        print(f"  Chunk ({i},{j}): loading from cache {chunk_file.name}")
-                        tmp_files.append(chunk_file)
-                        continue
+                        try:
+                            test_read = gpd.read_file(chunk_file)
+                            if len(test_read) >= 0:
+                                print(f"  Chunk ({i},{j}): loading from cache {chunk_file.name}")
+                                tmp_files.append(chunk_file)
+                                del test_read
+                                continue
+                            else:
+                                print(f"  Chunk ({i},{j}): cache file is empty or corrupted, re-downloading...")
+                                chunk_file.unlink()
+                        except Exception as read_error:
+                            print(f"  Chunk ({i},{j}): cache file corrupted ({read_error}), re-downloading...")
+                            chunk_file.unlink()
                     
                     print(f"  Chunk ({i},{j}): downloading...")
                     try:
                         gdf_chunk = ox.features_from_bbox(bbox=sub_bbox, tags=tags)
                         if not gdf_chunk.empty:
+                            if 'ID' in gdf_chunk.columns:
+                                gdf_chunk = gdf_chunk.drop(columns=['ID'])
                             # Save chunk immediately
                             gdf_chunk.to_file(chunk_file, driver="GPKG")
                             tmp_files.append(chunk_file)
@@ -214,15 +229,20 @@ class OSMFetcher:
                             # Create empty file as marker to skip next time
                             chunk_file.touch()
                             print(f"    -> empty")
+                        time.sleep(2)
                     except Exception as e:
                         print(f"    -> Failed: {e}")
                         # Don't create cache file on failure, so it retries next time
+                        if chunk_file.exists():
+                            chunk_file.unlink()
+                            print(f"    -> Removed incomplete cache file")
             
             if tmp_files:
                 self._raw_gdf = gpd.GeoDataFrame()
                 for tmp_file in tmp_files:
                     chunk = gpd.read_file(tmp_file)
                     self._raw_gdf = pd.concat([self._raw_gdf, chunk], ignore_index=True)
+                    print(f"  Merged {len(chunk)} features from {tmp_file.name}")
                     del chunk
             else:
                 print("Warning: No data found for the given box and tags.")
