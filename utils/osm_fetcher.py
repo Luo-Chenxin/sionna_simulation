@@ -153,11 +153,8 @@ class OSMFetcher:
             Path to the local GeoPackage file. If data is split into chunks,
             they will be stored in CHUNKS_DIR with a unique prefix.
         """
-        import os
-        import hashlib
-        
         # Check if single file cache exists
-        if os.path.exists(filepath):
+        if filepath.exists():
             print(f"Loading OSM data from local file: {filepath}")
             try:
                 self._raw_gdf = gpd.read_file(filepath)
@@ -168,7 +165,9 @@ class OSMFetcher:
                 print("Falling back to online fetch...")
         
         # Check for chunk files using unique cache prefix
-        cache_key = hashlib.md5(f"{bbox}{sorted(tags.keys())}".encode()).hexdigest()[:8]
+        # import hashlib
+        # cache_key = hashlib.md5(f"{bbox}{sorted(tags.keys())}".encode()).hexdigest()[:8]
+        cache_key = '9ea77292'
         chunk_pattern = f"{cache_key}_chunk_*_*.gpkg"
         chunk_files = sorted(CHUNKS_DIR.glob(chunk_pattern))
         

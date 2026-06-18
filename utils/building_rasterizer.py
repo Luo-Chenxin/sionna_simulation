@@ -1,7 +1,7 @@
 import geopandas as gpd
 import numpy as np
 from rasterio.features import rasterize
-from rasterio.transform import from_origin
+from rasterio.transform import Affine
 from typing import Dict
 from config import LocalCRS
 from utils.map_splitter import BlockMeta
@@ -58,11 +58,13 @@ class BuildingRasterizer:
         # Create (geometry, value) pairs: each building footprint gets value 1
         shapes = [(geom, 1) for geom in self.gdf.geometry]
 
-        transform = from_origin(
-            self.x_min,              # west edge
-            self.y_max,              # north edge (note: y_max, not y_min)
-            self.resolution_m,  # cell width in meters
-            self.resolution_m   # cell height in meters
+        transform = Affine.from_gdal(
+            self.x_min,          # Start from the West edge (left)
+            self.resolution_m,   # Move East per column (positive step)
+            0.0,                 # No rotation
+            self.y_min,          # Start from the South edge (bottom)
+            0.0,                 # No rotation
+            self.resolution_m    # Move North per row (positive step)
         )
         
         # Burn vector shapes into the raster grid

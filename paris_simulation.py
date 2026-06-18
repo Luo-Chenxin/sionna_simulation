@@ -62,7 +62,7 @@ TRANSMITTER_PATH = Path('data/transmitters/2600_mhz.csv')
 
 # Block splitting parameters
 BLOCK_SIZE_M = 256
-OVERLAP_M = 150
+OVERLAP_M = 0
 STRIDE_M = 128
 
 # Geographic boundaries (calculated from transmitter locations + 500m extension)
