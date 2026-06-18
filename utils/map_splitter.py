@@ -12,6 +12,7 @@ class BlockMeta:
     col: int
     name: str
     block_size_m: int
+    stride_m: int
     x_start: int
     x_end: int
     y_start: int
@@ -36,12 +37,21 @@ class TileSplitter:
             lon_min: float, 
             lon_max: float, 
             block_size_m: int, 
-            overlap_m: int):
+            overlap_m: int,
+            stride_m: int | None = None):
         """
         Initialize the splitter with pure meter-level grid alignment.
+        
+        Parameters
+        ----------
+        stride_m : int, optional
+            The step size between blocks in meters. If None, defaults to block_size_m.
+            When stride_m < block_size_m, blocks will overlap.
+            When stride_m = block_size_m, blocks are adjacent (default behavior).
         """
         self.block_size_m = block_size_m
         self.overlap_m = overlap_m
+        self.stride_m = stride_m if stride_m is not None else block_size_m
         
         self.to_utm = Transformer.from_crs(LocalCRS.OSM_STORAGE.crs, LocalCRS.FRANCE_LAMBERT93.crs, always_xy=True)
         self.to_latlon = Transformer.from_crs(LocalCRS.FRANCE_LAMBERT93.crs, LocalCRS.OSM_STORAGE.crs, always_xy=True)
@@ -62,27 +72,42 @@ class TileSplitter:
         total_height_m = self.y_max - self.y_min
         
         # Calculate how many rows and columns we need.
-        # Use ceil to cover the whole area.
-        self.cols = int(np.ceil(total_width_m / self.block_size_m))
-        self.rows = int(np.ceil(total_height_m / self.block_size_m))
+        # Use coverage-first strategy: ensure the entire area is covered.
+        # Formula: ceil((total_size - block_size) / stride) + 1, at least 1.
+        if total_width_m <= self.block_size_m:
+            self.cols = 1
+        else:
+            self.cols = int(np.ceil((total_width_m - self.block_size_m) / self.stride_m)) + 1
+        
+        if total_height_m <= self.block_size_m:
+            self.rows = 1
+        else:
+            self.rows = int(np.ceil((total_height_m - self.block_size_m) / self.stride_m)) + 1
         
         print(f"--- Grid Split Done ---")
         print(f"Total Width: {total_width_m:.2f}m, Total Height: {total_height_m:.2f}m")
         print(f"Grid Size: {self.rows} rows x {self.cols} cols. Total blocks: {self.rows * self.cols}")
+        print(f"Block size: {self.block_size_m}m, Stride: {self.stride_m}m, Overlap: {self.overlap_m}m")
 
     def get_block_latlon_bounds(self, row, col) -> BlockMeta:
         """
         Get Lat/Lon bounds for one block.
-        row: index from 0 to rows-1
-        col: index from 0 to cols-1
+        
+        Parameters
+        ----------
+        row : int
+            Row index from 0 to rows-1.
+        col : int
+            Column index from 0 to cols-1.
         """
         if not (0 <= row < self.rows and 0 <= col < self.cols):
             raise ValueError("Index out of range!")
             
         # Calculate core block corners in meters (no overlap)
-        x_start_core = self.x_min + col * self.block_size_m
+        # Use stride for start position, block_size for extent
+        x_start_core = self.x_min + col * self.stride_m
         x_end_core = x_start_core + self.block_size_m
-        y_start_core = self.y_min + row * self.block_size_m
+        y_start_core = self.y_min + row * self.stride_m
         y_end_core = y_start_core + self.block_size_m
         
         # Add overlap buffer for extended block
@@ -104,6 +129,7 @@ class TileSplitter:
             col=col,
             name=f"block_{row}_{col}",
             block_size_m=self.block_size_m,
+            stride_m=self.stride_m,
             x_start=x_start_ext, x_end=x_end_ext,
             y_start=y_start_ext, y_end=y_end_ext,
             # Latitude and longitude boundaries with overlap
@@ -119,9 +145,15 @@ class TileSplitter:
             overlap_m=self.overlap_m
         )
 
-    def get_all_blocks(self, tx_csv_path:Path):
+    def get_all_blocks(self, tx_csv_path: Path):
         """
-        Get a list of all block indices and names.
+        Get a list of all valid block indices and names.
+        A block is valid if it contains at least one transmitter in its core area.
+        
+        Parameters
+        ----------
+        tx_csv_path : Path
+            Path to the transmitter CSV file.
         """
         blocks_list = []
         for r in range(self.rows):
@@ -142,19 +174,18 @@ class TileSplitter:
         tx_csv_path: Path
     ) -> bool:
         """
-        Determine if the block is valid.
-        Valid: There are some transmitters in this block;
-        Invalid: No transmitter is in this block
-
+        Check if the block contains at least one transmitter in its core area.
+        
         Parameters
         ----------
-        block_meta: BlockMeta
+        block_meta : BlockMeta
         tx_csv_path : Path
             Path to the transmitter CSV file.
         
         Returns
         -------
         bool
+            True if at least one transmitter falls within the core area (no overlap).
         """
         # Load transmitter data from CSV
         df_tx = pd.read_csv(tx_csv_path)
@@ -169,7 +200,4 @@ class TileSplitter:
             (tx_lat <= block_meta.lat_max_core)
         )
         
-        if in_core.any():
-            return True
-        else:
-            return False
+        return bool(in_core.any())
