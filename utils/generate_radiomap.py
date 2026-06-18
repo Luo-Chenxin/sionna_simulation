@@ -112,10 +112,10 @@ class RadioMapGenerator:
         tx_lat = df_tx["Latitude"].to_numpy()
 
         in_core = (
-            (tx_lon >= self.block_meta.lon_min) &
-            (tx_lon <= self.block_meta.lon_max) &
-            (tx_lat >= self.block_meta.lat_min) &
-            (tx_lat <= self.block_meta.lat_max)
+            (tx_lon >= self.block_meta.lon_min_core) &
+            (tx_lon <= self.block_meta.lon_max_core) &
+            (tx_lat >= self.block_meta.lat_min_core) &
+            (tx_lat <= self.block_meta.lat_max_core)
         )
         df_core = df_tx.loc[in_core].copy()
 
@@ -197,14 +197,15 @@ class RadioMapGenerator:
             cells_to_crop = int(np.ceil(self.overlap_m / self.resolution_m))
             # Check if cropping is possible
             if cells_to_crop == 0:
-                self.crop_slice = np.s_[:, :self.n_rows, :self.n_cols]
+                self.crop_slice = np.s_[:, :, :]
             elif cells_to_crop * 2 < self.n_rows and cells_to_crop * 2 < self.n_cols:
+                # [tx, cols, rows]
                 self.crop_slice = np.s_[:, cells_to_crop:-cells_to_crop, cells_to_crop:-cells_to_crop]
             else:
                 # Overlap is too large relative to matrix size
-                self.crop_slice = np.s_[:, :self.n_rows, :self.n_cols]
+                self.crop_slice = np.s_[:, :, :]
         else:
-            self.crop_slice = np.s_[:, :self.n_rows, :self.n_cols]
+            self.crop_slice = np.s_[:, :, :]
 
     def _compute_radiomap(
         self,
@@ -241,6 +242,8 @@ class RadioMapGenerator:
 
         # rm.rss has shape [num_tx, num_cols, num_rows]
         rss_tensor = rm.rss.numpy()    # shape: (N_tx, n_cols, n_rows)
+
+        rss_tensor = np.transpose(rss_tensor, (0, 2, 1))    # shape: (N_tx, n_rows, n_cols)
 
         # Remove overlop
         rss_tensor = rss_tensor[self.crop_slice]    # shape: (N, n_rows_cropped, n_cols_cropped) 
