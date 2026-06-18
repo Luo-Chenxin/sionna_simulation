@@ -48,6 +48,36 @@ def add_txs(
             (float(x), float(y), float(z)),
             (float(azimuth), DEFAULT_PITCH, DEFAULT_ROLL)
         )
+def add_txs_no_overlap(
+        scene: rt.Scene,
+        df_tx: pd.DataFrame,
+        converter: SceneCoordinateConverter,
+        geometry_scene: rt.Scene):
+    """
+    Batch map geographic Tx coordinates into the 3D scene and instantiate
+    Transmitter objects, with Z raised above any scene geometry to avoid overlap.
+    """
+    xs, ys, zs = converter.latlonh_to_xyz_batch_no_overlap(
+        df_tx["Latitude"], df_tx["Longitude"], df_tx["height"], geometry_scene
+    )
+
+    azimuths = deflected_azimuth(df_tx["Azimut"])
+
+    for x, y, z, azimuth, row in zip(
+        xs, ys, zs, azimuths, df_tx.itertuples(index=False)
+    ):
+        name = get_tx_name(row.ID)
+
+        # Debug output to verify transmitter height alignment
+        print(f"TX {name} placed at x={x:.2f}, y={y:.2f}, z={z:.2f}, self_height={row.height:.2f}, azimuth={azimuth:.2f}")
+
+        # Explicitly cast to Python native float as expected by the scene renderer
+        add_tx(
+            scene,
+            name,
+            (float(x), float(y), float(z)),
+            (float(azimuth), DEFAULT_PITCH, DEFAULT_ROLL)
+        )
 
 def add_rx(scene, name, position):
     rx = rt.Receiver(name=name, position=position, display_radius=DISPLAY_RADIUS)
