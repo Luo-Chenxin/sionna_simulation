@@ -63,6 +63,7 @@ TRANSMITTER_PATH = Path('data/transmitters/2600_mhz.csv')
 # Block splitting parameters
 BLOCK_SIZE_M = 256
 OVERLAP_M = 150
+STRIDE_M = 128
 
 # Geographic boundaries (calculated from transmitter locations + 500m extension)
 LAT_MAX, LAT_MIN, LON_MIN, LON_MAX = process_csv_with_buffer(
@@ -578,7 +579,8 @@ def main():
         lon_min=LON_MIN,
         lon_max=LON_MAX,
         block_size_m=BLOCK_SIZE_M,
-        overlap_m=OVERLAP_M
+        overlap_m=OVERLAP_M,
+        stride_m=STRIDE_M
     )
     
     all_blocks = None

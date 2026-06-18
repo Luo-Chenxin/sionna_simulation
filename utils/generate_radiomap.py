@@ -4,7 +4,7 @@ from pathlib import Path
 import sionna.rt as rt
 import mitsuba as mi
 
-from utils.scene_utils import add_txs
+from utils.scene_utils import add_txs_no_overlap
 from utils.geo_coords import SceneCoordinateConverter
 from utils.map_splitter import BlockMeta
 from utils.material_factory import create_sionna_material
@@ -83,7 +83,8 @@ class RadioMapGenerator:
         self._modify_materials(scene)
 
         # Add transmitters to the scene
-        add_txs(scene, df_tx_core, self.converter, terrain_scene=None)
+        geometry_scene = rt.load_scene(xml_path)
+        add_txs_no_overlap(scene, df_tx_core, self.converter, geometry_scene)
 
         # Compute radio map and sum RSS
         rss_map = self._compute_radiomap(scene)
