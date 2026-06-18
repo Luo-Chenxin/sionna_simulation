@@ -105,6 +105,49 @@ class SceneCoordinateConverter:
         # Otherwise, return NumPy arrays
         return xs, ys, zs
 
+    def latlonh_to_xyz_batch_no_overlap(
+        self,
+        lat: pd.Series,
+        lon: pd.Series,
+        h: pd.Series,
+        scene: rt.Scene,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Convert (Lat, Lon, Height) to local Cartesian coordinates (X, Y, Z),
+        with Z raised above any scene geometry to avoid overlap.
+
+        +X: East (increasing longitude)
+        +Y: North (increasing latitude)
+        +Z: Up (increasing altitude)
+
+        If the input height (relative to origin) is below the scene geometry top,
+        the Z coordinate is set to geometry top height + 3 meters.
+        Otherwise, Z is the input height relative to origin.
+
+        Assumes scene world Z origin aligns with self.alt_origin.
+        """
+        lat_arr = np.asarray(lat, dtype=float)
+        lon_arr = np.asarray(lon, dtype=float)
+        h_arr = np.asarray(h, dtype=float)
+
+        # Reuse the internal transformer to save CPU time
+        x_objs, y_objs = self._transformer.transform(lon_arr, lat_arr)
+
+        xs = x_objs - self._x_origin
+        ys = y_objs - self._y_origin
+
+        # Get scene geometry top heights at each (X, Y) location
+        geometry_z = _get_terrain_z_batch(xs, ys, scene)
+
+        # Relative height of input points above scene origin
+        h_rel = h_arr - self.alt_origin
+
+        # If input point is below geometry top, place it on top of geometry + 3 meters
+        # Otherwise, use the input height directly
+        zs = np.where(h_rel < geometry_z, geometry_z + 3.0, h_rel)
+
+        return xs, ys, zs
+
 def deflected_azimuth(
     azimuth: pd.Series | float,
     multiplier: float = DEFAULT_AZIMUTH_MUTIPLITER,
