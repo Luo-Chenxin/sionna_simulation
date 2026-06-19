@@ -29,7 +29,7 @@ def extract_polygon_data(poly, offset_x, offset_y):
     roof_height = exterior_verts_roof[0][2]
     
     # ---- ROOF (top face) ----
-    roof_start_idx  = len(verts)
+    roof_start_idx = len(verts)
     # Exclude last point (same as first)
     verts.extend(exterior_verts_roof[:-1])
     
@@ -71,26 +71,42 @@ def extract_polygon_data(poly, offset_x, offset_y):
             continue
         
         if len(interior_coords[0]) == 2:
-            interior_verts_roof  = [(x - offset_x, y - offset_y, 0.0) for x, y in interior_coords]
+            interior_verts_roof = [(x - offset_x, y - offset_y, 0.0) for x, y in interior_coords]
         else:
-            interior_verts_roof  = [(x - offset_x, y - offset_y, z) for x, y, z in interior_coords]
+            interior_verts_roof = [(x - offset_x, y - offset_y, z) for x, y, z in interior_coords]
 
         interior_verts_ground = [(x, y, 0.0) for x, y, z in interior_verts_roof]
         
+        # ---- HOLE ROOF (top face, reversed winding) ----
         hole_roof_start = len(verts)
-        verts.extend(interior_verts_roof [:-1])
+        verts.extend(interior_verts_roof[:-1])
+        
+        # Create fan triangulation for hole roof (reversed for downward facing)
+        num_hole_roof_verts = len(interior_verts_roof) - 1
+        for i in range(1, num_hole_roof_verts - 1):
+            face_list.append([hole_roof_start, 
+                            hole_roof_start + i + 1, 
+                            hole_roof_start + i])
 
-        # Ground for hole
+        # ---- HOLE GROUND (bottom face, reversed winding) ----
         hole_ground_start = len(verts)
         verts.extend(interior_verts_ground[:-1])
+        
+        # Create fan triangulation for hole ground (normal winding for upward facing)
+        num_hole_ground_verts = len(interior_verts_ground) - 1
+        for i in range(1, num_hole_ground_verts - 1):
+            face_list.append([hole_ground_start, 
+                            hole_ground_start + i, 
+                            hole_ground_start + i + 1])
 
-        # Walls for hole (reverse orientation for inward facing)
+        # ---- HOLE WALLS (vertical faces, inward facing) ----
         num_hole_verts = len(interior_verts_roof) - 1
         
-        # Fan triangulation for holes (reversed for correct orientation)
-        for i in range(1, len(interior_verts_roof ) - 2):
+        for i in range(num_hole_verts):
+            # Skip walls at height 0 (no wall needed)
             if roof_height == 0.0:
                 continue
+            
             roof_i = hole_roof_start + i
             roof_next = hole_roof_start + ((i + 1) % num_hole_verts)
             ground_i = hole_ground_start + i
@@ -116,7 +132,7 @@ class OSMToPLY:
             gdf: gpd.GeoDataFrame, 
             ply_path: Path, 
             default_height: float, 
-            block_meta:BlockMeta):
+            block_meta: BlockMeta):
         """
         Initialize the converter with input data and parameters.
         

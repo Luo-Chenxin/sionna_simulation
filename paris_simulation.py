@@ -82,8 +82,8 @@ LAYERS = [
     {
         "tag_name": "buildings",
         "ply_filename": "buildings.ply",
-        "default_height": 0.0,
-        "handle_missing_height": "drop",
+        "default_height": 3,
+        "handle_missing_height": "use_default",
     },
 ]
 
