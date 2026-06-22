@@ -5,24 +5,26 @@ Paris Radio Map Generation Pipeline
 This script processes the Paris area radio map generation. It can run:
 - Step 1: Region Grid Splitting
 - Step 2: Per-Block PLY & XML Generation
-- Step 3: Per-Block Radio Map Generation
-- Step 4: Building Raster Generation  
-- Step 5: Transmitter Raster Generation
-- Step 6: Merge Block HDF5 Files
+- Step 3: Building Raster Generation  
+- Step 4: Transmitter Raster Generation
+- Step 5: Transmitter Relocation (to nearest building)
+- Step 6: Per-Block Radio Map Generation
+- Step 7: Merge Block HDF5 Files
 
 Usage:
     python paris_simulation.py [--skip-merge] [--start-step STEP] [--end-step STEP] [--step STEP]
 
 Options:
     --skip-merge       Skip the merge step (only process individual blocks)
-    --start-step N     Start from step N (1-6)
-    --end-step N       End at step N (1-6)
+    --start-step N     Start from step N (1-7)
+    --end-step N       End at step N (1-7)
     --step N           Run only step N (equivalent to --start-step N --end-step N)
 """
 
 import argparse
 import sys
 from pathlib import Path
+from typing import Union
 
 import numpy as np
 import pandas as pd
@@ -64,6 +66,10 @@ TRANSMITTER_PATH = Path('data/transmitters/2600_mhz.csv')
 BLOCK_SIZE_M = 256
 OVERLAP_M = 0
 STRIDE_M = 128
+
+# Transmitter relocation parameter
+USE_GRID_MODE = True  # True: use corrected grid from HDF5, False: use original CSV
+TX_SEARCH_RANGE = 20  # ±20 pixels (±20m) search range for relocation
 
 # Geographic boundaries (calculated from transmitter locations + 500m extension)
 LAT_MAX, LAT_MIN, LON_MIN, LON_MAX = process_csv_with_buffer(
@@ -127,6 +133,196 @@ def setup_antenna_array():
         polarization="cross",
     )
 
+
+# =============================================================================
+# Transmitter Relocator Class
+# =============================================================================
+
+class TransmitterRelocator:
+    """
+    Relocates transmitters to the nearest unoccupied building
+    within a square search range.
+
+    For each transmitter not already on a building, the class searches
+    for the nearest unoccupied building within ±d pixels (clipped to
+    image boundaries). If multiple buildings are at the same distance,
+    the one with the smallest x (row), then smallest y (column) is chosen.
+
+    Buildings already hosting a transmitter are marked as occupied
+    and cannot be selected by other transmitters.
+
+    Parameters
+    ----------
+    search_range : int
+        Half-size of the square search window. A transmitter at (i, j)
+        will search within rows [i-d, i+d] and cols [j-d, j+d].
+    """
+
+    def __init__(self, search_range: int):
+        if search_range < 0:
+            raise ValueError("search_range must be non-negative")
+        self.search_range = search_range
+
+    def process_file(self, file_path: Union[str, Path]) -> None:
+        """
+        Process a single HDF5 file in-place.
+
+        Reads 'transmitters' and 'buildings' datasets, relocates
+        transmitters according to the rules, and writes the updated
+        'transmitters' dataset back. All other datasets are left untouched.
+
+        Parameters
+        ----------
+        file_path : str or Path
+            Path to the HDF5 file to process.
+        """
+        file_path = Path(file_path)
+        if not file_path.exists():
+            raise FileNotFoundError(f"File not found: {file_path}")
+
+        with h5py.File(file_path, "r+") as f:
+            if "transmitters" not in f or "buildings" not in f:
+                raise KeyError(
+                    f"File {file_path} must contain 'transmitters' and 'buildings' datasets"
+                )
+
+            transmitters = f["transmitters"][:]  # shape (M, M), uint8
+            buildings = f["buildings"][:]        # shape (M, M), uint8
+
+            # Perform relocation
+            new_transmitters = self._relocate(transmitters, buildings)
+
+            # Write back to file
+            f["transmitters"][:] = new_transmitters
+
+    def _relocate(
+        self,
+        transmitters: np.ndarray,
+        buildings: np.ndarray
+    ) -> np.ndarray:
+        """
+        Core relocation logic for a single map.
+
+        Parameters
+        ----------
+        transmitters : np.ndarray
+            2D array of shape (M, M), dtype uint8.
+            1 indicates a transmitter, 0 indicates none.
+        buildings : np.ndarray
+            2D array of shape (M, M), dtype uint8.
+            1 indicates a building, 0 indicates none.
+
+        Returns
+        -------
+        np.ndarray
+            Updated transmitters array after relocation.
+        """
+        M = transmitters.shape[0]
+        d = self.search_range
+
+        # Copy transmitters to modify
+        result = transmitters.copy()
+
+        # Track which buildings are already occupied by a transmitter
+        # Initially: buildings that already have a transmitter on them
+        occupied = (buildings == 1) & (transmitters == 1)
+
+        # Get coordinates of all transmitter positions (row, col order)
+        tx_rows, tx_cols = np.where(transmitters == 1)
+
+        for tx_r, tx_c in zip(tx_rows, tx_cols):
+            # If transmitter is already on a building, it stays
+            # (occupied was already marked during initialization)
+            if buildings[tx_r, tx_c] == 1:
+                continue
+
+            # Search for the nearest unoccupied building within range
+            best_coords = self._find_nearest_building(
+                tx_r, tx_c, buildings, occupied, M, d
+            )
+
+            if best_coords is not None:
+                best_r, best_c = best_coords
+                # Move transmitter: clear old position, set new position
+                result[tx_r, tx_c] = 0
+                result[best_r, best_c] = 1
+                # Mark the new building as occupied
+                occupied[best_r, best_c] = True
+            # else: no building found within range, transmitter stays in place
+
+        return result
+
+    def _find_nearest_building(
+        self,
+        tx_r: int,
+        tx_c: int,
+        buildings: np.ndarray,
+        occupied: np.ndarray,
+        M: int,
+        d: int
+    ) -> tuple[int, int] | None:
+        """
+        Find the nearest unoccupied building within ±d of (tx_r, tx_c).
+
+        Tie-breaking: smallest row (x), then smallest column (y).
+
+        Parameters
+        ----------
+        tx_r, tx_c : int
+            Transmitter coordinates (row, column).
+        buildings : np.ndarray
+            Building map.
+        occupied : np.ndarray
+            Mask of buildings already occupied by a transmitter.
+        M : int
+            Size of the square map (M x M).
+        d : int
+            Search range half-width.
+
+        Returns
+        -------
+        (int, int) or None
+            Coordinates of the nearest building, or None if not found.
+        """
+        # Compute search boundaries, clipped to valid range
+        r_min = max(0, tx_r - d)
+        r_max = min(M - 1, tx_r + d)
+        c_min = max(0, tx_c - d)
+        c_max = min(M - 1, tx_c + d)
+
+        best_dist_sq = float("inf")
+        best_r = None
+        best_c = None
+
+        for r in range(r_min, r_max + 1):
+            for c in range(c_min, c_max + 1):
+                # Skip if no building here or building is already occupied
+                if buildings[r, c] == 0 or occupied[r, c]:
+                    continue
+
+                # Compute squared Euclidean distance
+                dr = r - tx_r
+                dc = c - tx_c
+                dist_sq = dr * dr + dc * dc
+
+                if dist_sq < best_dist_sq:
+                    best_dist_sq = dist_sq
+                    best_r = r
+                    best_c = c
+                elif dist_sq == best_dist_sq:
+                    # Tie-breaking: smaller row first, then smaller column
+                    if r < best_r or (r == best_r and c < best_c):
+                        best_r = r
+                        best_c = c
+
+        if best_r is not None:
+            return best_r, best_c
+        return None
+
+
+# =============================================================================
+# Pipeline Steps
+# =============================================================================
 
 def step1_split_region(splitter):
     """
@@ -241,97 +437,14 @@ def step2_generate_ply_and_xml(splitter, all_blocks):
     print(f"Output directory: {XML_DIR.resolve()}")
 
 
-def step3_generate_radiomaps(splitter, all_blocks):
+def step3_generate_building_rasters(splitter, all_blocks):
     """
-    Step 3: Per-Block Radio Map Generation
-    
-    For each block, load the XML scene and compute the radio map.
-    """
-    print("\n" + "=" * 60)
-    print("STEP 3: Per-Block Radio Map Generation")
-    print("=" * 60)
-    
-    tx_array = setup_antenna_array()
-    
-    # Ensure dataset directory exists
-    DATASET_DIR.mkdir(parents=True, exist_ok=True)
-    
-    for block_info in all_blocks:
-        row = block_info["row"]
-        col = block_info["col"]
-        block_name = block_info["name"]
-        
-        print(f"\n{'='*60}")
-        print(f"Processing {block_name} (row={row}, col={col})")
-        print(f"{'='*60}")
-        
-        # Get block metadata
-        meta = splitter.get_block_latlon_bounds(row, col)
-        
-        # Paths for this block
-        block_dir = XML_DIR / block_name
-        xml_path = block_dir / f"{block_name}.xml"
-        
-        # Check if XML exists before creating H5 file
-        if not xml_path.exists():
-            print(f"  [skip] XML file not found: {xml_path}")
-            continue
-        
-        # Initialize coordinate converter
-        lat_origin = (meta.lat_min + meta.lat_max) / 2.0
-        lon_origin = (meta.lon_min + meta.lon_max) / 2.0
-        converter = SceneCoordinateConverter(
-            lat_origin,
-            lon_origin,
-            TERRAIN_HEIGHT,
-            LocalCRS.OSM_STORAGE.crs,
-            LocalCRS.FRANCE_LAMBERT93.crs,
-        )
-        
-        # Generate radio map
-        generator = RadioMapGenerator(converter, meta, RM_RESOLUTION_M)
-        
-        rss_map = generator.generate(
-            xml_path=xml_path,
-            csv_path=TRANSMITTER_PATH,
-            tx_array=tx_array,
-            frequency=FREQUENCY,
-        )
-        
-        # Save result
-        h5_path = DATASET_DIR / f"{block_name}.h5"
-
-        if not h5_path.exists():
-            H5Manager.init_block_file(h5_path, meta, RM_RESOLUTION_M)
-        
-        if rss_map is None:
-            print(f"  [skip] No transmitters in core area of {block_name}")
-            if h5_path.exists():
-                H5Manager.clean_dataset(h5_path, H5Manager.DATASET_RADIOMAP)
-                print(f"  [h5] Cleared radiomap dataset in {h5_path}")
-        else:
-            print(f"  [done] RSS map shape: {rss_map.shape}, "
-                  f"dtype: {rss_map.dtype}, "
-                  f"min: {rss_map.min():.6e}, max: {rss_map.max():.6e}")
-            H5Manager.write_dataset(
-                h5_path,
-                H5Manager.DATASET_RADIOMAP,
-                rss_map,
-                dtype='float32',
-            )
-            print(f"  [h5] Written radiomap to {h5_path}")
-    
-    print(f"\nStep 3 complete. Processed {len(all_blocks)} blocks.")
-
-
-def step4_generate_building_rasters(splitter, all_blocks):
-    """
-    Step 4: Building Raster Generation
+    Step 3: Building Raster Generation
     
     For each block, rasterize building footprints into a binary presence matrix.
     """
     print("\n" + "=" * 60)
-    print("STEP 4: Building Raster Generation")
+    print("STEP 3: Building Raster Generation")
     print("=" * 60)
     
     # Reuse shared fetcher (already cached on disk from Step 2)
@@ -383,17 +496,17 @@ def step4_generate_building_rasters(splitter, all_blocks):
         )
         print(f"  [h5] Written buildings to {h5_path}")
     
-    print(f"\nStep 4 complete. Processed {len(all_blocks)} blocks.")
+    print(f"\nStep 3 complete. Processed {len(all_blocks)} blocks.")
 
 
-def step5_generate_transmitter_rasters(splitter, all_blocks):
+def step4_generate_transmitter_rasters(splitter, all_blocks):
     """
-    Step 5: Transmitter Raster Generation
+    Step 4: Transmitter Raster Generation
     
     For each block, rasterize transmitter locations into a binary presence matrix.
     """
     print("\n" + "=" * 60)
-    print("STEP 5: Transmitter Raster Generation")
+    print("STEP 4: Transmitter Raster Generation")
     print("=" * 60)
     
     # Load all transmitters
@@ -443,17 +556,215 @@ def step5_generate_transmitter_rasters(splitter, all_blocks):
         )
         print(f"  [h5] Written transmitters to {h5_path}")
     
-    print(f"\nStep 5 complete. Processed {len(all_blocks)} blocks.")
+    print(f"\nStep 4 complete. Processed {len(all_blocks)} blocks.")
 
 
-def step6_merge_blocks():
+def step5_relocate_transmitters(splitter, all_blocks):
     """
-    Step 6: Merge Block HDF5 Files
+    Step 5: Transmitter Relocation
+    
+    For each block, relocate transmitters that are not on buildings
+    to the nearest unoccupied building within search range.
+    """
+    print("\n" + "=" * 60)
+    print("STEP 5: Transmitter Relocation")
+    print("=" * 60)
+    
+    print(f"Search range: ±{TX_SEARCH_RANGE} pixels (±{TX_SEARCH_RANGE}m)")
+    
+    relocator = TransmitterRelocator(search_range=TX_SEARCH_RANGE)
+    
+    total_relocated = 0
+    total_unchanged = 0
+    total_not_found = 0
+    
+    for block_info in all_blocks:
+        block_name = block_info["name"]
+        h5_path = DATASET_DIR / f"{block_name}.h5"
+        
+        print(f"\n{'='*60}")
+        print(f"Processing {block_name}")
+        print(f"{'='*60}")
+        
+        if not h5_path.exists():
+            print(f"  [skip] HDF5 file not found: {h5_path}")
+            continue
+        
+        try:
+            # Count transmitters before relocation
+            with h5py.File(h5_path, "r") as f:
+                if "transmitters" not in f or "buildings" not in f:
+                    print(f"  [skip] Missing required datasets in {h5_path}")
+                    continue
+                
+                tx_before = f["transmitters"][:]
+                buildings = f["buildings"][:]
+                
+                n_tx_total = int(np.sum(tx_before))
+                n_tx_on_building = int(np.sum(tx_before & buildings))
+                n_tx_off_building = n_tx_total - n_tx_on_building
+            
+            # Perform relocation
+            relocator.process_file(h5_path)
+            
+            # Count transmitters after relocation
+            with h5py.File(h5_path, "r") as f:
+                tx_after = f["transmitters"][:]
+                n_tx_on_building_after = int(np.sum(tx_after & buildings))
+                n_tx_off_building_after = n_tx_total - n_tx_on_building_after
+            
+            n_relocated = n_tx_on_building_after - n_tx_on_building
+            n_not_found = n_tx_off_building - n_relocated
+            
+            total_relocated += n_relocated
+            total_unchanged += n_tx_on_building
+            total_not_found += n_not_found
+            
+            print(f"  Total TX:                {n_tx_total}")
+            print(f"  Already on building:     {n_tx_on_building} (unchanged)")
+            print(f"  Relocated to building:   {n_relocated}")
+            if n_not_found > 0:
+                print(f"  No building in range:    {n_not_found} (stayed in place)")
+            
+        except Exception as e:
+            print(f"  [error] Failed to process {block_name}: {e}")
+            continue
+    
+    print(f"\nStep 5 complete.")
+    print(f"Summary across all blocks:")
+    print(f"  Total relocated:         {total_relocated}")
+    print(f"  Already on building:     {total_unchanged}")
+    if total_not_found > 0:
+        print(f"  No building in range:    {total_not_found}")
+
+
+def step6_generate_radiomaps(splitter, all_blocks):
+    """
+    Step 6: Per-Block Radio Map Generation
+    
+    For each block, load the XML scene and compute the radio map.
+    Supports two transmitter placement modes:
+      - Grid mode (USE_GRID_MODE=True):  reads corrected transmitter grid from HDF5
+      - CSV mode  (USE_GRID_MODE=False): reads original transmitter locations from CSV
+    """
+    print("\n" + "=" * 60)
+    print("STEP 6: Per-Block Radio Map Generation")
+    print("=" * 60)
+    print(f"Tx placement mode: {'GRID (from HDF5)' if USE_GRID_MODE else 'CSV (original)'}")
+    
+    tx_array = setup_antenna_array()
+    
+    # Ensure dataset directory exists
+    DATASET_DIR.mkdir(parents=True, exist_ok=True)
+    
+    for block_info in all_blocks:
+        row = block_info["row"]
+        col = block_info["col"]
+        block_name = block_info["name"]
+        
+        print(f"\n{'='*60}")
+        print(f"Processing {block_name} (row={row}, col={col})")
+        print(f"{'='*60}")
+        
+        # Get block metadata
+        meta = splitter.get_block_latlon_bounds(row, col)
+        
+        # Paths for this block
+        block_dir = XML_DIR / block_name
+        xml_path = block_dir / f"{block_name}.xml"
+        
+        # Check if XML exists
+        if not xml_path.exists():
+            print(f"  [skip] XML file not found: {xml_path}")
+            continue
+        
+        # Initialize coordinate converter (needed for both modes)
+        lat_origin = (meta.lat_min + meta.lat_max) / 2.0
+        lon_origin = (meta.lon_min + meta.lon_max) / 2.0
+        converter = SceneCoordinateConverter(
+            lat_origin,
+            lon_origin,
+            TERRAIN_HEIGHT,
+            LocalCRS.OSM_STORAGE.crs,
+            LocalCRS.FRANCE_LAMBERT93.crs,
+        )
+        
+        # Initialize generator
+        generator = RadioMapGenerator(converter, meta, RM_RESOLUTION_M)
+
+        # Define h5_path for this block
+        h5_path = DATASET_DIR / f"{block_name}.h5"
+        
+        # Branch on transmitter placement mode
+        if USE_GRID_MODE:
+            # ---- Grid mode: read transmitter grid from HDF5 ----
+            
+            if not h5_path.exists():
+                print(f"  [skip] HDF5 file not found: {h5_path}")
+                continue
+            
+            with h5py.File(h5_path, "r") as f:
+                if "transmitters" not in f:
+                    print(f"  [skip] 'transmitters' dataset not found in {h5_path}")
+                    continue
+                tx_grid = f["transmitters"][:]
+            
+            if not np.any(tx_grid):
+                print(f"  [skip] No transmitters in grid for {block_name}")
+                # Ensure HDF5 file exists and clean any stale radiomap
+                if h5_path.exists():
+                    H5Manager.init_block_file(h5_path, meta, RM_RESOLUTION_M)
+                    H5Manager.clean_dataset(h5_path, H5Manager.DATASET_RADIOMAP)
+                    print(f"  [h5] Cleared radiomap dataset in {h5_path}")
+                continue
+            
+            # Generate radio map from grid
+            rss_map = generator.generate_from_grid(
+                xml_path=xml_path,
+                tx_grid=tx_grid,
+                tx_array=tx_array,
+                frequency=FREQUENCY,
+            )
+        else:
+            # ---- CSV mode: filter transmitters from CSV ----
+            rss_map = generator.generate(
+                xml_path=xml_path,
+                csv_path=TRANSMITTER_PATH,
+                tx_array=tx_array,
+                frequency=FREQUENCY,
+            )
+
+        if not h5_path.exists():
+            H5Manager.init_block_file(h5_path, meta, RM_RESOLUTION_M)
+        
+        if rss_map is None:
+            print(f"  [skip] No transmitters in core area of {block_name}")
+            if h5_path.exists():
+                H5Manager.clean_dataset(h5_path, H5Manager.DATASET_RADIOMAP)
+                print(f"  [h5] Cleared radiomap dataset in {h5_path}")
+        else:
+            print(f"  [done] RSS map shape: {rss_map.shape}, "
+                  f"dtype: {rss_map.dtype}, "
+                  f"min: {rss_map.min():.6e}, max: {rss_map.max():.6e}")
+            H5Manager.write_dataset(
+                h5_path,
+                H5Manager.DATASET_RADIOMAP,
+                rss_map,
+                dtype='float32',
+            )
+            print(f"  [h5] Written radiomap to {h5_path}")
+    
+    print(f"\nStep 6 complete. Processed {len(all_blocks)} blocks.")
+
+
+def step7_merge_blocks():
+    """
+    Step 7: Merge Block HDF5 Files
     
     Merge all individual block HDF5 files into a single unified file.
     """
     print("\n" + "=" * 60)
-    print("STEP 6: Merge Block HDF5 Files")
+    print("STEP 7: Merge Block HDF5 Files")
     print("=" * 60)
     
     print(f"Merging blocks from: {DATASET_DIR}")
@@ -479,7 +790,7 @@ def step6_merge_blocks():
     else:
         print("\nNo output file created (no valid samples).")
     
-    print("\nStep 6 complete.")
+    print("\nStep 7 complete.")
 
 
 def main():
@@ -494,26 +805,26 @@ def main():
     parser.add_argument(
         "--start-step",
         type=int,
-        choices=[1, 2, 3, 4, 5, 6],
+        choices=[1, 2, 3, 4, 5, 6, 7],
         default=1,
-        help="Start from step N (1-6, default: 1)"
+        help="Start from step N (1-7, default: 1)"
     )
     parser.add_argument(
         "--end-step",
         type=int,
-        choices=[1, 2, 3, 4, 5, 6],
-        help="End at step N (1-6, default: 6 if not --skip-merge else 5)"
+        choices=[1, 2, 3, 4, 5, 6, 7],
+        help="End at step N (1-7, default: 7 if not --skip-merge else 6)"
     )
     parser.add_argument(
         "--step",
         type=int,
-        choices=[1, 2, 3, 4, 5, 6],
+        choices=[1, 2, 3, 4, 5, 6, 7],
         help="Run only step N (equivalent to --start-step N --end-step N)"
     )
     parser.add_argument(
         "--skip-xml-check",
         action="store_true",
-        help="Skip checking if XML directory exists (for Step 3-5 when XML not yet generated)"
+        help="Skip checking if XML directory exists (for Step 6 when XML not yet generated)"
     )
     parser.add_argument(
         "--clear-osm-cache",
@@ -530,9 +841,9 @@ def main():
     # Set default end_step
     if args.end_step is None:
         if args.skip_merge:
-            args.end_step = 5
-        else:
             args.end_step = 6
+        else:
+            args.end_step = 7
     
     # Validate step range
     if args.start_step > args.end_step:
@@ -550,6 +861,8 @@ def main():
     print(f"Overlap:            {OVERLAP_M} m")
     print(f"Resolution:         {RM_RESOLUTION_M} m")
     print(f"Frequency:          {FREQUENCY / 1e9:.1f} GHz")
+    print(f"Tx Placement Mode:  {'GRID (HDF5)' if USE_GRID_MODE else 'CSV (original)'}") 
+    print(f"TX Search Range:    ±{TX_SEARCH_RANGE} m")
     print(f"Skip Merge:         {args.skip_merge}")
     print(f"OSM Cache:          data/osm_cache/ (auto-managed)")
     print("=" * 60)
@@ -567,10 +880,10 @@ def main():
         CHUNKS_DIR.mkdir(parents=True, exist_ok=True)
         METADATA_DIR.mkdir(parents=True, exist_ok=True)
     
-    # Check if XML directory exists for steps that need it (3, 4, 5)
-    if args.start_step >= 3 and not XML_DIR.exists() and not args.skip_xml_check:
+    # Check if XML directory exists for steps that need it (Step 6)
+    if args.start_step >= 6 and not XML_DIR.exists() and not args.skip_xml_check:
         print(f"\nWarning: XML directory '{XML_DIR}' does not exist.")
-        print("Step 3-5 require pre-generated PLY and XML files.")
+        print("Step 6 requires pre-generated PLY and XML files.")
         response = input("Continue anyway? (y/N): ")
         if response.lower() != 'y':
             print("Exiting.")
@@ -601,14 +914,16 @@ def main():
         elif step == 2:
             step2_generate_ply_and_xml(splitter, all_blocks)
         elif step == 3:
-            step3_generate_radiomaps(splitter, all_blocks)
+            step3_generate_building_rasters(splitter, all_blocks)
         elif step == 4:
-            step4_generate_building_rasters(splitter, all_blocks)
+            step4_generate_transmitter_rasters(splitter, all_blocks)
         elif step == 5:
-            step5_generate_transmitter_rasters(splitter, all_blocks)
+            step5_relocate_transmitters(splitter, all_blocks)
         elif step == 6:
+            step6_generate_radiomaps(splitter, all_blocks)
+        elif step == 7:
             if not args.skip_merge:
-                step6_merge_blocks()
+                step7_merge_blocks()
             else:
                 print("\nSkipping merge step as requested.")
     

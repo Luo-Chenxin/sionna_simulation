@@ -4,7 +4,7 @@ from pathlib import Path
 import sionna.rt as rt
 import mitsuba as mi
 
-from utils.scene_utils import add_txs_no_overlap
+from utils.scene_utils import add_txs_no_overlap, add_txs_from_grid
 from utils.geo_coords import SceneCoordinateConverter
 from utils.map_splitter import BlockMeta
 from utils.material_factory import create_sionna_material
@@ -85,6 +85,64 @@ class RadioMapGenerator:
         # Add transmitters to the scene
         geometry_scene = rt.load_scene(xml_path)
         add_txs_no_overlap(scene, df_tx_core, self.converter, geometry_scene)
+
+        # Compute radio map and sum RSS
+        rss_map = self._compute_radiomap(scene)
+
+        return rss_map
+    
+    def generate_from_grid(
+        self,
+        xml_path: Path,
+        tx_grid: np.ndarray,
+        tx_array: rt.PlanarArray,
+        frequency: float,
+    ) -> np.ndarray | None:
+        """
+        Generate a summed RSS map using transmitter positions from a binary grid.
+
+        Unlike ``generate()`` which reads transmitter locations from a CSV file,
+        this method places transmitters wherever ``tx_grid[row][col] == 1``.
+        The grid should already be corrected (e.g. relocated to nearest buildings)
+        before calling this method.
+
+        Parameters
+        ----------
+        xml_path : Path
+            Sionna scene XML file. The corresponding ``mesh/`` directory must be
+            located in the same folder as the XML file.
+        tx_grid : np.ndarray
+            2D uint8 array of shape (M, M) where 1 means place a transmitter.
+            Typically read from an HDF5 file's ``transmitters`` dataset.
+        tx_array : rt.PlanarArray
+            Antenna array to be used for all transmitters.
+        frequency : float
+            Carrier frequency in Hz.
+
+        Returns
+        -------
+        ndarray or None
+            A 2D float array of summed linear RSS [W] with shape
+            ``(num_rows, num_cols)``. Returns ``None`` if ``tx_grid`` has no
+            active transmitters (all zeros).
+        """
+        # Skip if grid has no transmitters
+        if not np.any(tx_grid):
+            return None
+
+        # Load and configure the Sionna scene
+        scene = self._load_and_setup_scene(xml_path, frequency, tx_array)
+
+        # Modify radio materials
+        self._modify_materials(scene)
+
+        # Load a separate geometry scene for height queries.
+        # Kept independent from ``scene`` so that future extensions can modify
+        # ``scene`` (e.g. adding custom objects) without affecting height lookups.
+        geometry_scene = rt.load_scene(xml_path)
+
+        # Place transmitters from grid
+        add_txs_from_grid(scene, tx_grid, geometry_scene)
 
         # Compute radio map and sum RSS
         rss_map = self._compute_radiomap(scene)
