@@ -291,7 +291,7 @@ class RadioMapGenerator:
 
         rm = solver(
             scene,
-            max_depth=5,
+            max_depth=20,
             samples_per_tx=int(1e7),
             cell_size=mi.Point2f(self.resolution_m, self.resolution_m),
             center=mi.Point3f(0.0, 0.0, 0.0),

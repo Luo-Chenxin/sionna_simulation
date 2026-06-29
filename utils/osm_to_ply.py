@@ -4,120 +4,158 @@ from shapely.geometry import Polygon, MultiPolygon
 from pathlib import Path
 from config import LocalCRS
 from utils.map_splitter import BlockMeta
+import mapbox_earcut as earcut
 
-def extract_polygon_data(poly, offset_x, offset_y):
-    """Extract vertices and create faces for a single polygon including walls."""
-    verts = []
-    face_list = []
+def extract_polygon_data(polygon, center_x, center_y, default_height):
+    """
+    Convert a 3D polygon to mesh vertices and faces including walls.
+    Generates both the roof (top surface) and vertical walls (sides).
     
-    # Get exterior ring vertices
-    exterior_coords = list(poly.exterior.coords)
-    
-    if len(exterior_coords) == 0:
-        return verts, face_list
-    
-    # Handle both 2D and 3D coordinates
-    if len(exterior_coords[0]) == 2:
-        exterior_verts_roof = [(x - offset_x, y - offset_y, 0.0) for x, y in exterior_coords]
-    else:
-        exterior_verts_roof = [(x - offset_x, y - offset_y, z) for x, y, z in exterior_coords]
-
-    # Create ground vertices (z=0)
-    exterior_verts_ground = [(x, y, 0.0) for x, y, z in exterior_verts_roof]
-    
-    # Get the roof height (use first vertex's z coordinate)
-    roof_height = exterior_verts_roof[0][2]
-    
-    # ---- ROOF (top face) ----
-    roof_start_idx = len(verts)
-    # Exclude last point (same as first)
-    verts.extend(exterior_verts_roof[:-1])
-    
-    # Create fan triangulation for roof
-    for i in range(1, len(exterior_verts_roof) - 2):
-        face_list.append([roof_start_idx, roof_start_idx + i, roof_start_idx + i + 1])
-
-    # ---- GROUND (bottom face) ----
-    ground_start_idx = len(verts)
-    verts.extend(exterior_verts_ground[:-1])
-    
-    # Create fan triangulation for ground (reversed for downward facing)
-    for i in range(1, len(exterior_verts_ground) - 2):
-        face_list.append([ground_start_idx, ground_start_idx + i + 1, ground_start_idx + i])
-    
-    # ---- WALLS (vertical faces) ----
-    num_roof_verts = len(exterior_verts_roof) - 1  # Number of unique vertices
-    
-    for i in range(num_roof_verts):
-        # Indices for the four corners of this wall segment
-        roof_i = roof_start_idx + i
-        roof_next = roof_start_idx + ((i + 1) % num_roof_verts)
-        ground_i = ground_start_idx + i
-        ground_next = ground_start_idx + ((i + 1) % num_roof_verts)
+    Parameters
+    ----------
+    polygon : Polygon
+        3D polygon geometry, possibly with holes
+    center_x : float
+        X coordinate of center point for translation
+    center_y : float
+        Y coordinate of center point for translation
         
-        # Skip walls at height 0 (no wall needed)
-        if roof_height == 0.0:
+    Returns
+    -------
+    tuple
+        (vertices, faces) where vertices is list of [x, y, z] and faces is list of [i, j, k]
+    """
+    if polygon.is_empty:
+        return [], []
+    
+    # Validate polygon
+    if not polygon.is_valid:
+        polygon = polygon.buffer(0)
+        if not polygon.is_valid:
+            return [], []
+    
+    all_vertices = []
+    all_faces = []
+    
+    # ============================================================
+    # PART 1: Generate roof (top surface with triangulation)
+    # ============================================================
+    
+    # Get the building height from first vertex
+    exterior_coords = list(polygon.exterior.coords)
+    first_coord = exterior_coords[0]
+    height = first_coord[2] if len(first_coord) > 2 else default_height
+    
+    # Collect vertices for triangulation (2D for earcut)
+    vertices_2d = []
+    roof_vertex_map = {}  # Map from 2D coord index to 3D vertex index
+    
+    # Process exterior ring
+    exterior_coords = exterior_coords[:-1]  # Remove closing point
+    
+    if len(exterior_coords) < 3:
+        return [], []
+    
+    for x, y, *rest in exterior_coords:
+        local_x = x - center_x
+        local_y = y - center_y
+        coord_2d = (round(local_x, 6), round(local_y, 6))
+        
+        if coord_2d not in roof_vertex_map:
+            # Add 3D vertex at roof height
+            vertex_idx = len(all_vertices)
+            all_vertices.append([local_x, local_y, height])
+            roof_vertex_map[coord_2d] = vertex_idx
+        
+        vertices_2d.append([local_x, local_y])
+    
+    # Track ring end indices for earcut
+    ring_end_indices = [len(exterior_coords)]
+    total_vertices = len(exterior_coords)
+    
+    # Process holes
+    for interior in polygon.interiors:
+        interior_coords = list(interior.coords)[:-1]
+        
+        if len(interior_coords) < 3:
             continue
         
-        # Two triangles per wall segment
-        face_list.append([roof_i, ground_i, ground_next])
-        face_list.append([roof_i, ground_next, roof_next])
-    
-    # Process interior rings (holes)
-    for interior in poly.interiors:
-        interior_coords = list(interior.coords)
-        
-        if len(interior_coords) == 0:
-            continue
-        
-        if len(interior_coords[0]) == 2:
-            interior_verts_roof = [(x - offset_x, y - offset_y, 0.0) for x, y in interior_coords]
-        else:
-            interior_verts_roof = [(x - offset_x, y - offset_y, z) for x, y, z in interior_coords]
-
-        interior_verts_ground = [(x, y, 0.0) for x, y, z in interior_verts_roof]
-        
-        # ---- HOLE ROOF (top face, reversed winding) ----
-        hole_roof_start = len(verts)
-        verts.extend(interior_verts_roof[:-1])
-        
-        # Create fan triangulation for hole roof (reversed for downward facing)
-        num_hole_roof_verts = len(interior_verts_roof) - 1
-        for i in range(1, num_hole_roof_verts - 1):
-            face_list.append([hole_roof_start, 
-                            hole_roof_start + i + 1, 
-                            hole_roof_start + i])
-
-        # ---- HOLE GROUND (bottom face, reversed winding) ----
-        hole_ground_start = len(verts)
-        verts.extend(interior_verts_ground[:-1])
-        
-        # Create fan triangulation for hole ground (normal winding for upward facing)
-        num_hole_ground_verts = len(interior_verts_ground) - 1
-        for i in range(1, num_hole_ground_verts - 1):
-            face_list.append([hole_ground_start, 
-                            hole_ground_start + i, 
-                            hole_ground_start + i + 1])
-
-        # ---- HOLE WALLS (vertical faces, inward facing) ----
-        num_hole_verts = len(interior_verts_roof) - 1
-        
-        for i in range(num_hole_verts):
-            # Skip walls at height 0 (no wall needed)
-            if roof_height == 0.0:
-                continue
+        for x, y, *rest in interior_coords:
+            local_x = x - center_x
+            local_y = y - center_y
+            coord_2d = (round(local_x, 6), round(local_y, 6))
             
-            roof_i = hole_roof_start + i
-            roof_next = hole_roof_start + ((i + 1) % num_hole_verts)
-            ground_i = hole_ground_start + i
-            ground_next = hole_ground_start + ((i + 1) % num_hole_verts)
+            if coord_2d not in roof_vertex_map:
+                vertex_idx = len(all_vertices)
+                all_vertices.append([local_x, local_y, height])
+                roof_vertex_map[coord_2d] = vertex_idx
             
-            # Reverse order for holes (facing inward)
-            face_list.append([roof_i, ground_next, ground_i])
-            face_list.append([roof_i, roof_next, ground_next])
+            vertices_2d.append([local_x, local_y])
+        
+        total_vertices += len(interior_coords)
+        ring_end_indices.append(total_vertices)
     
-    return verts, face_list
-
+    # Triangulate roof
+    vertices_array = np.array(vertices_2d, dtype=np.float32)
+    ring_indices_array = np.array(ring_end_indices, dtype=np.uint32)
+    
+    try:
+        triangle_indices = earcut.triangulate_float32(vertices_array, ring_indices_array)
+    except Exception as e:
+        print(f"  Roof earcut error: {e}")
+        return [], []
+    
+    # Add roof faces
+    for i in range(0, len(triangle_indices), 3):
+        v1 = int(triangle_indices[i])
+        v2 = int(triangle_indices[i + 1])
+        v3 = int(triangle_indices[i + 2])
+        
+        if v1 != v2 and v2 != v3 and v1 != v3:
+            all_faces.append([v1, v2, v3])
+    
+    # ============================================================
+    # PART 2: Generate walls (vertical faces)
+    # ============================================================
+    
+    # Walls are generated from exterior ring only (holes don't get walls)
+    # For each edge of the exterior ring, create two triangles forming a quad
+    
+    num_exterior = len(exterior_coords)
+    
+    for i in range(num_exterior):
+        # Get current and next vertex index (wrapping around)
+        curr_2d_idx = i
+        next_2d_idx = (i + 1) % num_exterior
+        
+        # Get 2D coordinates
+        curr_2d = (round(vertices_2d[curr_2d_idx][0], 6), 
+                   round(vertices_2d[curr_2d_idx][1], 6))
+        next_2d = (round(vertices_2d[next_2d_idx][0], 6), 
+                   round(vertices_2d[next_2d_idx][1], 6))
+        
+        # Get roof vertex indices
+        curr_roof_idx = roof_vertex_map[curr_2d]
+        next_roof_idx = roof_vertex_map[next_2d]
+        
+        curr_ground_x, curr_ground_y = vertices_2d[curr_2d_idx]
+        next_ground_x, next_ground_y = vertices_2d[next_2d_idx]
+        
+        # Create ground level vertices (Z = 0)
+        # Simple approach: always add ground vertices
+        curr_ground_idx = len(all_vertices)
+        all_vertices.append([curr_ground_x, curr_ground_y, 0.0])
+        
+        next_ground_idx = len(all_vertices)
+        all_vertices.append([next_ground_x, next_ground_y, 0.0])
+        
+        # Create two triangles for the wall quad
+        # Triangle 1: ground_curr -> roof_curr -> roof_next
+        all_faces.append([curr_ground_idx, curr_roof_idx, next_roof_idx])
+        # Triangle 2: ground_curr -> roof_next -> ground_next
+        all_faces.append([curr_ground_idx, next_roof_idx, next_ground_idx])
+    
+    return all_vertices, all_faces
 
 class OSMToPLY:
     """
@@ -127,47 +165,21 @@ class OSMToPLY:
     and exports to PLY format with LocalCRS.FRANCE_LAMBERT93 coordination system.
     """
     
-    def __init__(
-            self, 
-            gdf: gpd.GeoDataFrame, 
-            ply_path: Path, 
-            default_height: float, 
-            block_meta: BlockMeta):
-        """
-        Initialize the converter with input data and parameters.
-        
-        Parameters
-        ----------
-        gdf : gpd.GeoDataFrame
-            Input GeoDataFrame containing Polygon or MultiPolygon geometries
-        ply_path : Path
-            Output PLY file path
-        default_height : float
-            Default height value for polygons without height information
-        block_meta : BlockMeta
-        """
+    def __init__(self, gdf, ply_path, default_height, block_meta, handle_missing_height):
+        """Initialize and process all polygons"""
         self.original_gdf = gdf.copy()
         self.ply_path = ply_path
         self.default_height = default_height
         
-        # Convert to local CRS
         self.gdf = gdf.to_crs(LocalCRS.FRANCE_LAMBERT93.crs)
         
-        # Calculate center point of the gdf
         self.center_x = (block_meta.x_start + block_meta.x_end) / 2.0
         self.center_y = (block_meta.y_start + block_meta.y_end) / 2.0
         print(f"Center point: ({self.center_x:.2f}, {self.center_y:.2f})")
         
-        # Process polygons: extract heights and convert to 3D
-        if default_height == 0.0:
-            self._process_polygons(handle_missing_height='drop')
-        else:
-            self._process_polygons(handle_missing_height='use_default')
-        
-        # Collect all 3D polygons
+        # Process with explicit handle_missing_height parameter
+        self._process_polygons(handle_missing_height=handle_missing_height)
         self._collect_3d_polygons()
-        
-        # Build final MultiPolygon
         self._build_multi_polygon()
     
     def _process_polygons(self, handle_missing_height: str):
@@ -413,10 +425,10 @@ class OSMToPLY:
             return np.array([]).reshape(0, 3), np.array([]).reshape(0, 3)
         
         if polygon.geom_type == 'Polygon':
-            vertices, faces = extract_polygon_data(polygon, self.center_x, self.center_y)
+            vertices, faces = extract_polygon_data(polygon, self.center_x, self.center_y, self.default_height)
         elif polygon.geom_type == 'MultiPolygon':
             for poly in polygon.geoms:
-                poly_verts, poly_faces = extract_polygon_data(poly, self.center_x, self.center_y)
+                poly_verts, poly_faces = extract_polygon_data(poly, self.center_x, self.center_y, self.default_height)
                 
                 # Adjust face indices for existing vertices
                 offset = len(vertices)

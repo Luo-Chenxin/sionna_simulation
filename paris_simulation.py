@@ -404,10 +404,8 @@ def step2_generate_ply_and_xml(splitter, all_blocks):
                 ply_path=ply_path,
                 default_height=layer["default_height"],
                 block_meta=meta,
+                handle_missing_height=layer["handle_missing_height"],
             )
-            converter._process_polygons(handle_missing_height=layer["handle_missing_height"])
-            converter._collect_3d_polygons()
-            converter._build_multi_polygon()
             converter.save_to_ply()
             
             print(f"  [{tag_name}] Saved to {ply_path}")
