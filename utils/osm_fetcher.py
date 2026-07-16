@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import time 
 import json
+import hashlib
 
 # =============================================================================
 # Path Configuration - Centralized directory management
@@ -164,9 +165,8 @@ class OSMFetcher:
                 print("Falling back to online fetch...")
         
         # Check for chunk files using unique cache prefix
-        # import hashlib
-        # cache_key = hashlib.md5(f"{bbox}{sorted(tags.keys())}".encode()).hexdigest()[:8]
-        cache_key = '9ea77292'
+        cache_key = hashlib.md5(f"{bbox}{sorted(tags.keys())}".encode()).hexdigest()[:8]
+        # cache_key = '9ea77292'
         chunk_pattern = f"{cache_key}_chunk_*_*.gpkg"
         chunk_files = sorted(CHUNKS_DIR.glob(chunk_pattern))
         
@@ -270,8 +270,8 @@ class OSMFetcher:
             print(f"Large area ({area_km2:.1f} km²), splitting into {n_splits}x{n_splits} chunks...")
             
             # Generate unique cache prefix based on bbox and tags
-            # cache_key = hashlib.md5(f"{bbox}{sorted(tags.keys())}".encode()).hexdigest()[:8]
-            cache_key='9ea77292'
+            cache_key = hashlib.md5(f"{bbox}{sorted(tags.keys())}".encode()).hexdigest()[:8]
+            # cache_key='9ea77292'
             
             chunk_files = []
             for i in range(n_splits):
