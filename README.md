@@ -10,21 +10,18 @@ This project provides tools to:
 
 ## Prerequisites
 
-### Software Dependencies
-- Python 3.8+
-- Sionna
-- TensorFlow
-- Jupyter Notebook
-- Blender (for map file export)
-- Required Python packages:
-  - numpy
-  - pandas
-  - geopandas
-  - osmnx
-  - matplotlib
-  - shapely
-  - h5py
-  - ...
+### Installation Recommendations
+Due to some dependency conflicts between GeoLibrary and Sionna, the following installation order is important.
+```
+conda create -n sionna-clean python=3.10 -y
+conda activate sionna-clean
+pip install sionna-rt
+pip install h5py rasterio
+pip install osmnx
+pip install mapbox_earcut
+pip install ipykernel
+...
+```
 
 ### Map File
 Download the Massy area map file:

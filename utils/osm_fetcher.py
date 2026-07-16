@@ -1,6 +1,5 @@
 import osmnx as ox
 import geopandas as gpd
-gpd.options.io_engine = "fiona"
 import pandas as pd
 from typing import Dict, List, Union, Optional
 from shapely.geometry import box
@@ -225,9 +224,8 @@ class OSMFetcher:
         for chunk_file in self._chunk_files:
             try:
                 # Read just the bounds without loading all data
-                import fiona
-                with fiona.open(chunk_file) as src:
-                    metadata[str(chunk_file)] = src.bounds
+                with gpd.read_file(chunk_file) as src:
+                    metadata[str(chunk_file)] = tuple(src.total_bounds)
             except Exception:
                 continue
         
