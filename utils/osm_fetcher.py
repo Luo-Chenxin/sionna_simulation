@@ -270,7 +270,8 @@ class OSMFetcher:
             print(f"Large area ({area_km2:.1f} km²), splitting into {n_splits}x{n_splits} chunks...")
             
             # Generate unique cache prefix based on bbox and tags
-            cache_key = hashlib.md5(f"{bbox}{sorted(tags.keys())}".encode()).hexdigest()[:8]
+            # cache_key = hashlib.md5(f"{bbox}{sorted(tags.keys())}".encode()).hexdigest()[:8]
+            cache_key='9ea77292'
             
             chunk_files = []
             for i in range(n_splits):
